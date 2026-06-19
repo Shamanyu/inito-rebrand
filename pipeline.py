@@ -1075,7 +1075,8 @@ def export_serp_csv() -> None:
     # AI Overviews
     ai = df[df["url"].str.startswith("aioverview::", na=False)].copy()
     ai["query"] = ai["url"].str.removeprefix("aioverview::")
-    ai_out = ai[["query", "intent", "snippet", "status", "sentiment"]].copy()
+    ai_cols = [c for c in ["query", "intent", "snippet", "status", "sentiment"] if c in ai.columns]
+    ai_out = ai[ai_cols].copy()
     ai_out = ai_out.rename(columns={"snippet": "ai_overview_text", "status": "inito_status",
                                     "sentiment": "sentiment_score"})
     ai_out.insert(0, "source", "Google AI Overview")
@@ -1267,9 +1268,9 @@ def run_llm_visibility(models=None):
     bulk_rows = discover_llm_visibility(models=models)
     rows.extend(bulk_rows)
 
-    log("LLM VISIBILITY stage 1b: Google AI Mode (Gemini-powered, best-effort)")
-    gai_items = _safe_discover(discover_google_ai_mode, "google_ai_mode")
-    rows.extend(_google_ai_mode_to_llm_rows(gai_items))
+    # Google AI Mode removed from LLM visibility: actor has hardcoded 10-attempt
+    # exponential backoff on 502s (actor-internal, cannot be disabled externally).
+    # It remains in refresh() for SERP-context crawls only.
 
     if not rows:
         log("no LLM visibility rows — check actor slugs and config")

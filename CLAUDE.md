@@ -15,7 +15,9 @@ Every classification decision hinges on old-vs-current.
 
 ## Architecture
 
-Four stages, `pipeline.py`:
+Two independent tracks, both in `pipeline.py`:
+
+### Track A — Web/SERP (stale claim detection)
 
 1. **discover** — Apify actors emit URLs: Google SERP (`discover_serp`), Reddit (`discover_reddit`),
    IG/X/YouTube (`discover_social`). Residential proxies are why Reddit (normally 403 to datacenter
@@ -28,13 +30,42 @@ Four stages, `pipeline.py`:
 
 Apify owns stages 1–2; our code owns 3–4.
 
+### Track B — LLM Visibility (brand presence in AI answers)
+
+Runs via `run_llm_visibility()`, invoked by `--llm` or as part of `--refresh`.
+
+1. **discover_llm_visibility** — sends each prompt in `config.llm_visibility_prompts` to each model
+   in `config.llm_models` via `fayoussef/bulk-llm-runner`. Runs models in parallel
+   (ThreadPoolExecutor). Resume logic skips (model, run_index) combos already written today.
+2. **judge_llm_response** — Claude Haiku classifies each response: mentioned, rank, recommended,
+   stale_product_described, stale_excerpt, sources_cited, sentiment, competitors_named,
+   competitor_preferred, confidence.
+3. **persist_llm** — writes `llm_visibility_<date>.parquet` + updates history. Calls
+   `export_llm_csv` → `llm_visibility_latest.csv` with renamed columns + `action` column.
+4. **compute_llm_metrics** — Wilson CI for binary rates, mean±SE for sentiment, per-model breakdown.
+
+### Actor inventory
+
+| Actor slug | Purpose | Notes |
+|---|---|---|
+| `apify/google-search-scraper` | SERP + AI Overviews + chatGPT/Perplexity panels | Stable |
+| `apify/website-content-crawler` | Full page text for enrichment | Stable |
+| `trudax/reddit-scraper-lite` | Reddit posts/comments | Residential proxy |
+| `fayoussef/bulk-llm-runner` | LLM API calls (GPT-5, Gemini, Perplexity sonar-pro, Claude) | Core LLM actor |
+| `scrape.badger/google-ai-mode-scraper` | Google AI Mode (udm=50) | **Excluded from LLM run** — hardcoded 10-attempt internal retry on 5xx, no external kill switch. Used in `--refresh` only. |
+| `zhorex/perplexity-ai-scraper` | Perplexity web UI scraper | **Disabled** — Cloudflare blocks all datacenter + residential proxy attempts. Perplexity covered by sonar-pro API instead. |
+| Social actors (IG/X/YouTube/TikTok) | Social discovery | Wrapped in try/except; break on markup changes |
+
 ## Repo layout
 
 ```
-config.json     control surface (queries, claim regexes, domain lists, actor slugs, limits)
-pipeline.py     the orchestrator (stages above) + CLI
+config.json     control surface (queries, llm_visibility_prompts, llm_models, claim regexes,
+                domain lists, actor slugs, limits)
+pipeline.py     the orchestrator (both tracks) + CLI
 tests/          offline pytest suite (network deps stubbed in conftest.py)
-data/           outputs (gitignored): observations_*.parquet, *_history.parquet, metrics.csv, latest_snapshot.csv
+data/           outputs (gitignored): observations_*.parquet, llm_visibility_*.parquet,
+                *_history.parquet, metrics.csv, llm_metrics.csv, latest_snapshot.csv,
+                llm_visibility_latest.csv, serp_latest.csv
 README.md       setup + run + cost + scheduling
 ```
 
@@ -43,8 +74,9 @@ README.md       setup + run + cost + scheduling
 ```bash
 pip install -r requirements.txt
 export $(grep -v '^#' .env | xargs)        # APIFY_TOKEN, ANTHROPIC_API_KEY
-python pipeline.py --refresh               # full sweep
-python pipeline.py --refresh --no-social   # SERP + Reddit only (cheap)
+python pipeline.py --refresh               # full sweep (SERP + Reddit + social + LLM visibility)
+python pipeline.py --refresh --no-social   # SERP + Reddit + LLM visibility (cheap weekly)
+python pipeline.py --llm                   # LLM visibility only — fast, no web crawling
 python pipeline.py --diff-only             # recompute metrics, no crawling
 pytest -q                                  # offline tests
 ```
@@ -79,6 +111,17 @@ pytest -q                                  # offline tests
   query is tracked over time; they're excluded from page-fetch enrichment.
 - **Cost:** Haiku for the judge, `--no-social` for the weekly core, monthly for social. Add a
   fetch-cache (skip URLs unseen < N days) before scaling cadence.
+- **LLM API ≠ web UI**: ChatGPT/Gemini/Claude via API use training data only — no live search. The
+  web UI for all three enables live search by default. This gap explains why API results differ from
+  manual searches. Perplexity/sonar-pro is the exception: it always does live web search via API.
+- **Google AI Mode retries**: `scrape.badger/google-ai-mode-scraper` has hardcoded 10-attempt
+  exponential backoff on 5xx errors inside the actor itself — this cannot be disabled from outside.
+  Do not add it back to `run_llm_visibility()`. It's available in `refresh()` for SERP-context use.
+- **Perplexity web scraper** (`zhorex/perplexity-ai-scraper`) fails with Cloudflare blocks regardless
+  of proxy configuration. Don't attempt to re-enable it.
+- **LLM resume logic** reads `llm_visibility_history.parquet` to skip (model, run_index) combos
+  already completed today. If a model is being skipped incorrectly, delete today's rows from the
+  history parquet or use direct `run_actor()` calls to force a fresh run.
 
 ## Tests
 

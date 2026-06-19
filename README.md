@@ -7,6 +7,10 @@ Haiku judge does the classification.
 
 ## Pipeline
 
+Two independent tracks run on the same schedule:
+
+### Track A — Web/SERP (stale claim detection)
+
 ```
 discover            enrich                 classify                 persist + diff
 ─────────           ──────                 ────────                 ──────────────
@@ -20,11 +24,30 @@ YouTube       ─┘                     └─  competitor framing)          + 
 Each row is one URL with: ownership (owned / owned_marketplace / competitor / third_party),
 status (stale / mixed / current), the four claim flags, sentiment, competitor framing, and SERP rank.
 
+### Track B — LLM Visibility (brand presence in AI answers)
+
+```
+discover_llm_visibility                classify              persist + metrics
+───────────────────────                ────────              ────────────────
+fayoussef/bulk-llm-runner ──────────► Claude Haiku judge ─► llm_visibility_<date>.parquet
+  openai/gpt-5                          (mentioned, rank,    llm_visibility_history.parquet
+  google/gemini-2.5-pro                  recommended,        llm_visibility_latest.csv (→ Sheets)
+  perplexity/sonar-pro                   stale_claim,        llm_metrics.csv (time series)
+  anthropic/claude-sonnet-4.5            sentiment,
+                                         competitor_preferred,
+                                         action)
+```
+
+Each row is one (model × prompt × run) observation. Perplexity/sonar-pro always does live web
+search — its results reflect current third-party content, not just training data. The `action`
+column tells you what to do: fix stale claim, create content, submit provider correction, etc.
+
 ## Repo layout
 
 ```
-config.json     control surface — queries, claim regexes, domain lists, actor slugs, limits
-pipeline.py     orchestrator (discover → enrich → classify → persist → diff) + CLI
+config.json     control surface — queries, claim regexes, domain lists, actor slugs, limits,
+                llm_visibility_prompts, llm_models, llm_num_runs
+pipeline.py     orchestrator for both tracks + CLI
 CLAUDE.md       working context for Claude Code (invariants, conventions, gotchas)
 tests/          offline pytest suite (network deps stubbed)
 data/           outputs (gitignored)
@@ -46,14 +69,19 @@ Website Content Crawler are Apify-official and stable; the social ones vary most
 ## Run
 
 ```bash
-python pipeline.py --refresh              # full sweep (SERP + Reddit + social)
-python pipeline.py --refresh --no-social  # SERP + Reddit only — cheaper, good for weekly
+python pipeline.py --refresh              # full sweep (SERP + Reddit + social + LLM visibility)
+python pipeline.py --refresh --no-social  # SERP + Reddit + LLM visibility (no IG/X/YouTube)
+python pipeline.py --llm                  # LLM visibility only — fast, no crawling
 python pipeline.py --diff-only            # recompute metrics + print diff, no crawling
 ```
 
-Output lands in `data/`. Import `latest_snapshot.csv` into Google Sheets, or point Looker
-Studio / your warehouse at `observations_history.parquet`. `metrics.csv` is the decay curve to
-chart: `stale_or_mixed`, `owned_stale`, per-claim counts, `mean_sentiment`, `share_of_voice_category`.
+Output lands in `data/`:
+- `latest_snapshot.csv` — SERP track results → import to Google Sheets
+- `llm_visibility_latest.csv` — LLM track results (one row per model × prompt) → import to Sheets
+- `observations_history.parquet` — full SERP history
+- `llm_visibility_history.parquet` — full LLM history
+- `metrics.csv` — SERP decay curve: `stale_or_mixed`, `owned_stale`, per-claim counts, sentiment
+- `llm_metrics.csv` — LLM time series: mention rate, stale rate, sentiment per model
 
 ## Config
 
@@ -61,7 +89,9 @@ chart: `stale_or_mixed`, `owned_stale`, per-claim counts, `mean_sentiment`, `sha
 - **queries** — frozen query + intent. Never edit an existing query (breaks the series); add a new one.
 - **claim_patterns** — regex heuristics; the judge resolves ambiguity. Add patterns as new phrasings appear.
 - **owned/competitor_domains** — drives the ownership column and the `owned_stale` metric.
-- **limits.judge_model** — `claude-haiku-4-5` for cost. Current IDs: https://docs.claude.com/en/docs/about-claude/models
+- **limits.judge_model** — `claude-haiku-4-5-20251001` for cost. Current IDs: https://docs.claude.com/en/docs/about-claude/models
+- **llm_models** — models run via `fayoussef/bulk-llm-runner`. Currently: gpt-5, gemini-2.5-pro, perplexity/sonar-pro, claude-sonnet-4.5. Append-only.
+- **llm_visibility_prompts** — brand prompts sent to each LLM. Frozen like SERP queries — add, never edit.
 
 ## Tests
 
@@ -101,6 +131,15 @@ Swap the local parquet writes for `Actor.push_data()` / a KV store, and add a Sl
   (`aioverview::<query>`) so you keep the verbatim AI answer per query over time.
 - Ownership for app-store / Amazon pages is heuristic (Inito's own app ids + `/dp/` ASINs);
   verify seller/owner in edge cases.
+- **LLM track**: ChatGPT/Gemini/Claude via API use training-data knowledge only — no live search.
+  Perplexity/sonar-pro is the exception: it always searches the live web, so its results more
+  closely match what consumers see in the product. This gap is why API results differ from manual
+  searches in the web UI.
+- **Google AI Mode** (`scrape.badger/google-ai-mode-scraper`) is excluded from the LLM visibility
+  run: the actor has hardcoded 10-attempt exponential backoff on 5xx errors with no external kill
+  switch. It remains available in `discover_google_ai_mode()` for use in full `--refresh` runs.
+- **Perplexity web scraper** (`zhorex/perplexity-ai-scraper`) is Cloudflare-blocked (all datacenter
+  and residential proxy attempts timeout). Perplexity coverage is handled via API (sonar-pro).
 
 ## Push to GitHub
 
