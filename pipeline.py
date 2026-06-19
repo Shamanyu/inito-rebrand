@@ -558,12 +558,27 @@ def print_diff(mdf: pd.DataFrame):
 
 
 # ---------- orchestration ----------
+def _safe_discover(fn, label: str) -> list[dict]:
+    """Run a discovery function and return results, logging any failure gracefully."""
+    try:
+        results = fn()
+        log(f"  {label}: {len(results)} records")
+        return results
+    except Exception as e:
+        log(f"  {label} FAILED (skipping): {type(e).__name__}: {e}")
+        return []
+
 def refresh(no_social: bool):
     t0 = time.time()
     log("STAGE 1 discover")
-    recs = discover_serp() + discover_bing() + discover_news() + discover_reddit()
+    recs = (
+        _safe_discover(discover_serp,  "serp")
+        + _safe_discover(discover_bing,  "bing")
+        + _safe_discover(discover_news,  "news")
+        + _safe_discover(discover_reddit, "reddit")
+    )
     if not no_social:
-        recs += discover_social()
+        recs += _safe_discover(discover_social, "social")
 
     # keep best record per normalized url (lowest rank / longest snippet)
     best = {}
