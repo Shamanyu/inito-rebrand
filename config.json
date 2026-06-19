@@ -1,0 +1,64 @@
+{
+  "market": { "countryCode": "us", "languageCode": "en" },
+
+  "_comment_queries": "Versioned in git. Each entry is a frozen query + intent label. Never silently edit an existing query (it breaks the time series); add a new one and deprecate the old.",
+  "queries": [
+    { "q": "Inito fertility monitor", "intent": "brand_entity" },
+    { "q": "Inito review", "intent": "brand_entity" },
+    { "q": "Inito price", "intent": "brand_entity" },
+    { "q": "how accurate is Inito", "intent": "brand_entity" },
+    { "q": "Inito iPhone only", "intent": "attribute_probe" },
+    { "q": "does Inito work on Android", "intent": "attribute_probe" },
+    { "q": "Inito requires phone camera", "intent": "attribute_probe" },
+    { "q": "Inito attach to phone clip", "intent": "attribute_probe" },
+    { "q": "Inito InSight Wireless Reader", "intent": "attribute_probe" },
+    { "q": "best at-home fertility monitor", "intent": "category" },
+    { "q": "best ovulation test 2026", "intent": "category" },
+    { "q": "at-home PdG LH estrogen FSH test", "intent": "category" },
+    { "q": "Inito vs Mira", "intent": "comparison" },
+    { "q": "is Mira more accurate than Inito", "intent": "comparison" },
+    { "q": "Inito vs Proov", "intent": "comparison" },
+    { "q": "Inito problems", "intent": "adversarial" },
+    { "q": "is Inito legit", "intent": "adversarial" },
+    { "q": "why is Inito inaccurate", "intent": "adversarial" }
+  ],
+
+  "reddit_searches": ["inito", "inito fertility", "inito android", "inito vs mira"],
+  "social_keywords": ["inito", "inito fertility monitor"],
+  "youtube_searches": ["inito fertility monitor review", "inito insight wireless reader"],
+
+  "_comment_claims": "Heuristic regex (case-insensitive). The LLM judge resolves ambiguity and assigns final status. Add patterns as you see new phrasings.",
+  "claim_patterns": {
+    "iphone_only": ["only.{0,20}iphone", "iphone.{0,12}only", "only compatible with ios", "iphone 7 and up", "specific iphone models", "compatible with iphone models only"],
+    "attach_to_phone": ["attach.{0,40}(phone|iphone)", "snaps? onto", "clip.{0,30}(phone|iphone)", "attachment clip", "connect.{0,30}monitor.{0,15}phone", "strap.{0,25}(device|monitor).{0,15}phone", "plug.{0,20}into.{0,20}(phone|charging port)"],
+    "camera_dependent": ["phone'?s camera", "camera.{0,20}(scan|sensor|read|capture)", "uses your (iphone|phone) camera", "camera and.{0,12}lighting", "lightning port and camera"],
+    "no_android": ["not (available|supported|compatible).{0,20}android", "android.{0,20}not (supported|available|compatible)", "inaccessible to android", "no android compatibility", "won'?t work.{0,20}android"]
+  },
+  "current_signal_patterns": ["insight wireless reader", "wi-?fi enabled", "compatible with (both )?(ios|iphone) and android", "now (on|available (on|for)) android"],
+  "price_pattern": "\\$\\s?\\d{2,4}",
+
+  "owned_domains": ["inito.com", "blog.inito.com", "ng.inito.com", "apps.apple.com", "play.google.com"],
+  "_comment_owned": "apps.apple.com / play.google.com / amazon listings are owned only for Inito's own listings. Ownership is refined in code: amazon ASINs are flagged owned_marketplace; app-store pages matched by the Inito app id.",
+  "owned_app_ids": ["id1183799668", "com.inito.insight"],
+  "competitor_domains": ["miracare.com", "shop.miracare.com", "proovtest.com", "ovul.ai"],
+
+  "actors": {
+    "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned. These are the categories you need.",
+    "serp": "apify/google-search-scraper",
+    "content": "apify/website-content-crawler",
+    "reddit": "trudax/reddit-scraper-lite",
+    "instagram": "apify/instagram-scraper",
+    "twitter": "apidojo/tweet-scraper",
+    "youtube": "streamers/youtube-scraper"
+  },
+
+  "limits": {
+    "serp_results_per_query": 100,
+    "serp_pages_per_query": 1,
+    "reddit_max_items": 120,
+    "social_max_items": 80,
+    "youtube_max_items": 40,
+    "judge_model": "claude-haiku-4-5-20251001",
+    "_comment_model": "Cheapest model, right for high-volume classification. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
+  }
+}
