@@ -873,6 +873,119 @@ def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
     return rows
 
 
+def _derive_action(row: dict) -> str:
+    """Single most-important action for this (model, prompt) observation."""
+    if row.get("status") == "error":
+        return f"Actor failed — retry or check {row.get('model','?')} actor config"
+    if not row.get("inito_mentioned"):
+        return "Not visible — Inito absent from this response; create/update content to enter training data"
+    if row.get("stale_product_described"):
+        stale_src = row.get("stale_sources") or ""
+        src_hint = f" (stale source: {stale_src.split(',')[0]})" if stale_src else ""
+        return f"Stale claim detected{src_hint} — submit correction/feedback to {row.get('model','?')} provider"
+    cp = row.get("competitor_preferred") or ""
+    if cp and not row.get("inito_recommended"):
+        return f"Competitor gap — {cp} preferred; build comparison content targeting this prompt"
+    if row.get("inito_recommended"):
+        return "Positive — monitor to ensure this holds; no action needed"
+    return "Neutral mention — strengthen positioning content for this prompt"
+
+
+def _sources_to_plain(sources_json: str) -> str:
+    """Convert JSON array of source URLs to comma-separated plain text (Sheets auto-links)."""
+    try:
+        items = json.loads(sources_json or "[]")
+        # filter to real URLs only; drop bare domain labels
+        urls = [s for s in items if s and s.startswith("http")]
+        return ", ".join(urls)
+    except Exception:
+        return ""
+
+
+def export_llm_csv(rows: list[dict]) -> None:
+    """Write a Sheets-friendly CSV with clickable sources, action column, and clean column names."""
+    out = []
+    for r in rows:
+        sources_plain = _sources_to_plain(r.get("sources_cited", "[]"))
+        # stale sources = subset of sources that likely carry stale content (heuristic: any URL
+        # that appears in the stale_excerpt context — we can't know for sure, so list all sources
+        # when stale is True so the analyst can check them)
+        stale_sources = sources_plain if r.get("stale_product_described") else ""
+        row_out = r.copy()
+        row_out["stale_sources_to_fix"] = stale_sources
+        row_out["action"] = _derive_action({**r, "stale_sources": stale_sources})
+        row_out["sources_cited"] = sources_plain
+        out.append(row_out)
+
+    df = pd.DataFrame(out)
+    # Rename for clarity
+    col_map = {
+        "run_date": "date",
+        "run_index": "run_#",
+        "inito_mentioned": "mentioned",
+        "inito_rank": "rank_in_response",
+        "inito_recommended": "recommended",
+        "stale_product_described": "stale_claim",
+        "stale_excerpt": "stale_quote",
+        "sources_cited": "sources (clickable URLs)",
+        "sentiment_inito": "sentiment (-1 to +1)",
+        "competitors_named": "competitors_mentioned",
+        "competitor_preferred": "competitor_preferred",
+    }
+    df = df.rename(columns=col_map)
+
+    # Column order for the sheet
+    ordered = [
+        "date", "model", "prompt", "intent",
+        "mentioned", "rank_in_response", "recommended", "sentiment (-1 to +1)",
+        "stale_claim", "stale_quote", "stale_sources_to_fix",
+        "competitors_mentioned", "competitor_preferred",
+        "sources (clickable URLs)",
+        "response_text",
+        "action",
+        "run_#", "status", "confidence",
+    ]
+    ordered = [c for c in ordered if c in df.columns]
+    extra = [c for c in df.columns if c not in ordered]
+    df = df[ordered + extra]
+
+    # Truncate response_text for sheet readability
+    if "response_text" in df.columns:
+        df["response_text"] = df["response_text"].fillna("").str[:800]
+
+    df.to_csv(DATA / "llm_visibility_latest.csv", index=False)
+    log(f"  exported {len(df)} rows -> llm_visibility_latest.csv")
+
+
+def export_serp_csv() -> None:
+    """Write SERP AI Overviews + top organic results to a separate CSV for the sheet."""
+    snap = DATA / "latest_snapshot.csv"
+    if not snap.exists():
+        log("  no latest_snapshot.csv — skipping SERP export")
+        return
+    df = pd.read_csv(snap)
+
+    # AI Overviews
+    ai = df[df["url"].str.startswith("aioverview::", na=False)].copy()
+    ai["query"] = ai["url"].str.removeprefix("aioverview::")
+    ai_out = ai[["query", "intent", "snippet", "status", "sentiment"]].copy()
+    ai_out = ai_out.rename(columns={"snippet": "ai_overview_text", "status": "inito_status",
+                                    "sentiment": "sentiment_score"})
+    ai_out.insert(0, "source", "Google AI Overview")
+
+    # Top organic (rank ≤ 5), excluding aioverview rows
+    org = df[df["platform"].isin(["web", "news"]) & df["url"].notna()].copy()
+    org = org[org["rank"].notna() & (org["rank"] <= 5)]
+    org_cols = [c for c in ["rank", "url", "title", "query", "intent", "platform",
+                             "ownership", "status", "sentiment"] if c in org.columns]
+    org_out = org[org_cols].copy()
+    org_out.insert(0, "source", "Google Organic")
+
+    combined = pd.concat([ai_out, org_out], ignore_index=True)
+    combined.to_csv(DATA / "serp_latest.csv", index=False)
+    log(f"  exported {len(ai_out)} AI overviews + {len(org_out)} top-5 organic -> serp_latest.csv")
+
+
 def persist_llm(rows: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     snap = DATA / f"llm_visibility_{RUN_DATE}.parquet"
@@ -883,7 +996,7 @@ def persist_llm(rows: list[dict]) -> pd.DataFrame:
         prev = prev[prev["run_date"] != RUN_DATE]
         df = pd.concat([prev, df], ignore_index=True)
     df.to_parquet(hist, index=False)
-    pd.DataFrame(rows).to_csv(DATA / "llm_visibility_latest.csv", index=False)
+    export_llm_csv(rows)          # human-readable sheet export (replaces raw CSV)
     log(f"persisted {len(rows)} LLM visibility rows -> {snap.name}")
     return df
 
@@ -977,6 +1090,8 @@ def run_llm_visibility(models=None):
     df_all = persist_llm(rows)
     log("LLM VISIBILITY stage 3: metrics")
     compute_llm_metrics(df_all)
+    log("LLM VISIBILITY stage 4: SERP export")
+    export_serp_csv()
     log(f"LLM visibility done in {time.time()-t0:.0f}s")
 
 
