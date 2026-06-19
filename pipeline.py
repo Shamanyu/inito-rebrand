@@ -718,58 +718,94 @@ def judge_llm_response(prompt: str, model: str, response_text: str) -> dict:
         }
 
 
-def discover_llm_visibility(models=None) -> list[dict]:
-    """Run all llm_visibility_prompts through bulk-llm-runner for each model.
-    Returns one row per (prompt, model) pair with the raw response and judge verdict."""
+def _wilson_ci(k: int, n: int, z: float = 1.96):
+    """Wilson score 95% CI for a proportion. Returns (point_est, lo, hi)."""
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    p = k / n
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = z * (p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5 / denom
+    return round(p, 3), round(max(0.0, center - half), 3), round(min(1.0, center + half), 3)
+
+
+def _mean_ci(values: list, z: float = 1.96):
+    """Mean ± z·SE for a continuous variable. Returns (mean, lo, hi)."""
+    n = len(values)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    mu = sum(values) / n
+    if n == 1:
+        return round(mu, 3), round(mu, 3), round(mu, 3)
+    var = sum((x - mu) ** 2 for x in values) / (n - 1)
+    se = (var / n) ** 0.5
+    return round(mu, 3), round(mu - z * se, 3), round(mu + z * se, 3)
+
+
+def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
+    """Run all llm_visibility_prompts through bulk-llm-runner for each model × num_runs.
+
+    num_runs repeated calls with datacenter proxies sample response variance (LLM temperature +
+    location-sensitive web-search results for Perplexity/Gemini). Each row gets a run_index so
+    compute_llm_metrics() can calculate Wilson CIs across the pooled observations.
+    """
     prompts_cfg = CFG.get("llm_visibility_prompts", [])
     if not prompts_cfg:
         log("  no llm_visibility_prompts in config.json — skipping LLM visibility run")
         return []
 
-    models = models or CFG.get("llm_models", ["gpt-4o-mini"])
+    models = models or CFG.get("llm_models", ["openai/gpt-4o"])
+    num_runs = num_runs or CFG.get("llm_num_runs", 1)
     system_prompt = CFG.get("llm_system_prompt", "")
+    proxy_group = CFG.get("llm_proxy_group", "DATACENTER")
     actor_slug = CFG["actors"]["llm_runner"]
     prompt_strings = [p["prompt"] for p in prompts_cfg]
     intent_map = {p["prompt"]: p["intent"] for p in prompts_cfg}
 
     rows = []
     for model in models:
-        log(f"  LLM visibility: running {len(prompt_strings)} prompts on {model}")
-        run_input = {
-            "prompts": prompt_strings,
-            "model": model,
-        }
-        if system_prompt:
-            run_input["systemPrompt"] = system_prompt
-        try:
-            items = run_actor(actor_slug, run_input, f"llm_runner/{model}")
-        except Exception as e:
-            log(f"  llm_runner/{model} FAILED (skipping): {e}")
-            continue
-
-        for item in items:
-            prompt_text = item.get("prompt") or item.get("input") or ""
-            response_text = item.get("response") or item.get("output") or item.get("answer") or ""
-            if not prompt_text:
+        for run_idx in range(1, num_runs + 1):
+            log(f"  LLM visibility: {model} run {run_idx}/{num_runs} ({len(prompt_strings)} prompts)")
+            run_input = {
+                "prompts": prompt_strings,
+                "model": model,
+                "proxyConfiguration": {
+                    "useApifyProxy": True,
+                    "apifyProxyGroups": [proxy_group],
+                },
+            }
+            if system_prompt:
+                run_input["systemPrompt"] = system_prompt
+            try:
+                items = run_actor(actor_slug, run_input, f"llm/{model}/run{run_idx}")
+            except Exception as e:
+                log(f"  llm/{model}/run{run_idx} FAILED (skipping): {e}")
                 continue
-            verdict = judge_llm_response(prompt_text, model, response_text)
-            rows.append({
-                "run_date":               RUN_DATE,
-                "model":                  model,
-                "prompt":                 prompt_text,
-                "intent":                 intent_map.get(prompt_text, "unknown"),
-                "response_text":          response_text[:4000],
-                "inito_mentioned":        verdict.get("inito_mentioned", False),
-                "inito_rank":             verdict.get("inito_rank"),
-                "inito_recommended":      verdict.get("inito_recommended", False),
-                "stale_product_described": verdict.get("stale_product_described", False),
-                "sentiment_inito":        verdict.get("sentiment_inito", 0.0),
-                "competitors_named":      json.dumps(verdict.get("competitors_named", [])),
-                "competitor_preferred":   verdict.get("competitor_preferred"),
-                "confidence":             verdict.get("confidence", 0.3),
-            })
 
-    log(f"  LLM visibility: {len(rows)} results collected")
+            for item in items:
+                prompt_text = item.get("prompt") or item.get("input") or ""
+                response_text = item.get("response") or item.get("output") or item.get("answer") or ""
+                if not prompt_text:
+                    continue
+                verdict = judge_llm_response(prompt_text, model, response_text)
+                rows.append({
+                    "run_date":                RUN_DATE,
+                    "run_index":               run_idx,
+                    "model":                   model,
+                    "prompt":                  prompt_text,
+                    "intent":                  intent_map.get(prompt_text, "unknown"),
+                    "response_text":           response_text[:4000],
+                    "inito_mentioned":         verdict.get("inito_mentioned", False),
+                    "inito_rank":              verdict.get("inito_rank"),
+                    "inito_recommended":       verdict.get("inito_recommended", False),
+                    "stale_product_described": verdict.get("stale_product_described", False),
+                    "sentiment_inito":         verdict.get("sentiment_inito", 0.0),
+                    "competitors_named":       json.dumps(verdict.get("competitors_named", [])),
+                    "competitor_preferred":    verdict.get("competitor_preferred"),
+                    "confidence":              verdict.get("confidence", 0.3),
+                })
+
+    log(f"  LLM visibility: {len(rows)} total observations ({num_runs} run(s) × {len(models)} model(s))")
     return rows
 
 
@@ -789,30 +825,70 @@ def persist_llm(rows: list[dict]) -> pd.DataFrame:
 
 
 def compute_llm_metrics(df_all: pd.DataFrame) -> dict:
+    """Compute point estimates + 95% Wilson/mean CIs pooled across all run_index values.
+
+    Binary metrics (mention, recommend, stale): Wilson score CI — handles small n and edge
+    proportions (0, 1) correctly. Continuous (sentiment): mean ± 1.96·SE.
+
+    Per-prompt stats are written to llm_visibility_stats.csv for drill-down.
+    Aggregate per-model and overall stats go to llm_metrics.csv (the time series).
+    """
     cur = df_all[df_all["run_date"] == RUN_DATE]
     if cur.empty:
         return {}
 
-    metrics = {"run_date": RUN_DATE}
-    metrics["llm_total_responses"] = int(len(cur))
+    num_runs = int(cur["run_index"].nunique()) if "run_index" in cur.columns else 1
+    log(f"  computing LLM metrics over {len(cur)} observations ({num_runs} run(s))")
 
-    # per-model breakdown
+    def _prop_stats(series, prefix):
+        k = int(series.sum()); n = len(series)
+        p, lo, hi = _wilson_ci(k, n)
+        return {f"{prefix}": p, f"{prefix}_lo": lo, f"{prefix}_hi": hi, f"{prefix}_n": n}
+
+    def _cont_stats(series, prefix):
+        vals = series.dropna().tolist()
+        mu, lo, hi = _mean_ci(vals)
+        return {f"{prefix}": mu, f"{prefix}_lo": lo, f"{prefix}_hi": hi}
+
+    # per-prompt × model stats (most granular — for the drill-down CSV)
+    prompt_rows = []
+    for (model, prompt), grp in cur.groupby(["model", "prompt"]):
+        row = {"run_date": RUN_DATE, "model": model, "prompt": prompt,
+               "intent": grp["intent"].iloc[0], "n_obs": len(grp)}
+        row.update(_prop_stats(grp["inito_mentioned"],         "mention"))
+        row.update(_prop_stats(grp["inito_recommended"],       "recommended"))
+        row.update(_prop_stats(grp["stale_product_described"], "stale"))
+        row.update(_cont_stats(grp["sentiment_inito"],         "sentiment"))
+        ranks = grp["inito_rank"].dropna().tolist()
+        if ranks:
+            mu, lo, hi = _mean_ci(ranks)
+            row.update({"rank_mean": mu, "rank_lo": lo, "rank_hi": hi})
+        prompt_rows.append(row)
+    pd.DataFrame(prompt_rows).to_csv(DATA / "llm_visibility_stats.csv", index=False)
+
+    # per-model aggregate (pooled across all prompts × runs)
+    metrics = {"run_date": RUN_DATE, "llm_total_observations": int(len(cur)),
+               "llm_num_runs": num_runs}
     for model, grp in cur.groupby("model"):
         safe = model.replace("-", "_").replace(".", "_").replace("/", "_")
-        metrics[f"llm_{safe}_mention_rate"]     = round(float(grp["inito_mentioned"].mean()), 3)
-        metrics[f"llm_{safe}_recommended_rate"] = round(float(grp["inito_recommended"].mean()), 3)
-        metrics[f"llm_{safe}_stale_rate"]        = round(float(grp["stale_product_described"].mean()), 3)
-        metrics[f"llm_{safe}_mean_sentiment"]    = round(float(grp["sentiment_inito"].mean()), 3)
-        rank_vals = grp["inito_rank"].dropna()
-        metrics[f"llm_{safe}_mean_rank"]         = round(float(rank_vals.mean()), 2) if len(rank_vals) else None
+        metrics.update({f"llm_{safe}_{k}": v for k, v in
+                        _prop_stats(grp["inito_mentioned"],         "mention").items()})
+        metrics.update({f"llm_{safe}_{k}": v for k, v in
+                        _prop_stats(grp["inito_recommended"],       "recommended").items()})
+        metrics.update({f"llm_{safe}_{k}": v for k, v in
+                        _prop_stats(grp["stale_product_described"], "stale").items()})
+        metrics.update({f"llm_{safe}_{k}": v for k, v in
+                        _cont_stats(grp["sentiment_inito"],         "sentiment").items()})
 
-    # aggregate across all models
-    metrics["llm_mention_rate"]      = round(float(cur["inito_mentioned"].mean()), 3)
-    metrics["llm_recommended_rate"]  = round(float(cur["inito_recommended"].mean()), 3)
-    metrics["llm_stale_rate"]        = round(float(cur["stale_product_described"].mean()), 3)
-    metrics["llm_mean_sentiment"]    = round(float(cur["sentiment_inito"].mean()), 3)
-    rank_all = cur["inito_rank"].dropna()
-    metrics["llm_mean_rank"]         = round(float(rank_all.mean()), 2) if len(rank_all) else None
+    # overall aggregate (all models + runs pooled)
+    metrics.update({f"llm_{k}": v for k, v in
+                    _prop_stats(cur["inito_mentioned"],         "mention").items()})
+    metrics.update({f"llm_{k}": v for k, v in
+                    _prop_stats(cur["inito_recommended"],       "recommended").items()})
+    metrics.update({f"llm_{k}": v for k, v in
+                    _prop_stats(cur["stale_product_described"], "stale").items()})
+    metrics.update({f"llm_{k}": v for k, v in
+                    _cont_stats(cur["sentiment_inito"],         "sentiment").items()})
 
     mpath = DATA / "llm_metrics.csv"
     mdf = pd.read_csv(mpath) if mpath.exists() else pd.DataFrame()
@@ -820,9 +896,8 @@ def compute_llm_metrics(df_all: pd.DataFrame) -> dict:
                      pd.DataFrame([metrics])], ignore_index=True)
     mdf.to_csv(mpath, index=False)
 
-    safe_metrics = {k: (None if (v != v if isinstance(v, float) else False) else v)
-                    for k, v in metrics.items()}
-    log(f"LLM visibility metrics: {json.dumps(safe_metrics, indent=2)}")
+    safe_m = {k: (None if isinstance(v, float) and v != v else v) for k, v in metrics.items()}
+    log(f"LLM visibility metrics: {json.dumps(safe_m, indent=2)}")
     return metrics
 
 
