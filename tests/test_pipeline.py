@@ -157,6 +157,60 @@ def test_metrics_and_diff_decay(pipe):
     assert 0 <= m2["run_quality_score"] <= 100
 
 
+# ---------- LLM visibility ----------
+def test_judge_llm_response_fallback(pipe):
+    # anthropic is stubbed -> falls back deterministically
+    v = pipe.judge_llm_response("Inito reviews", "gpt-4o-mini",
+                                 "Inito is a great fertility monitor.")
+    assert isinstance(v["inito_mentioned"], bool)
+    assert "sentiment_inito" in v
+    assert 0.0 <= v["confidence"] <= 1.0
+
+def test_discover_llm_visibility_runs_actor(pipe, monkeypatch):
+    fake_items = [
+        {"prompt": "Inito", "response": "Inito is a good product."},
+        {"prompt": "Inito reviews", "response": "Inito has positive reviews."},
+    ]
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake_items)
+    rows = pipe.discover_llm_visibility(models=["gpt-4o-mini"])
+    assert len(rows) == 2
+    assert rows[0]["model"] == "gpt-4o-mini"
+    assert rows[0]["prompt"] == "Inito"
+    assert "inito_mentioned" in rows[0]
+    assert "stale_product_described" in rows[0]
+
+def test_persist_llm_writes_files(pipe):
+    rows = [
+        {"run_date": "2026-06-19", "model": "gpt-4o-mini", "prompt": "Inito",
+         "intent": "brand_entity", "response_text": "text", "inito_mentioned": True,
+         "inito_rank": 1, "inito_recommended": True, "stale_product_described": False,
+         "sentiment_inito": 0.8, "competitors_named": "[]", "competitor_preferred": None,
+         "confidence": 0.9},
+    ]
+    pipe.persist_llm(rows)
+    assert (pipe.DATA / "llm_visibility_latest.csv").exists()
+
+def test_compute_llm_metrics(pipe):
+    rows = [
+        {"run_date": pipe.RUN_DATE, "model": "gpt-4o-mini", "prompt": "Inito",
+         "intent": "brand_entity", "response_text": "t", "inito_mentioned": True,
+         "inito_rank": 1, "inito_recommended": True, "stale_product_described": False,
+         "sentiment_inito": 0.7, "competitors_named": "[]", "competitor_preferred": None,
+         "confidence": 0.9},
+        {"run_date": pipe.RUN_DATE, "model": "gpt-4o-mini", "prompt": "Inito reviews",
+         "intent": "brand_entity", "response_text": "t2", "inito_mentioned": False,
+         "inito_rank": None, "inito_recommended": False, "stale_product_described": True,
+         "sentiment_inito": -0.2, "competitors_named": '["Mira"]', "competitor_preferred": "Mira",
+         "confidence": 0.8},
+    ]
+    import pandas as pd
+    df = pipe.persist_llm(rows)
+    m = pipe.compute_llm_metrics(df)
+    assert m["llm_mention_rate"] == 0.5
+    assert m["llm_stale_rate"] == 0.5
+    assert "llm_gpt_4o_mini_mention_rate" in m
+
+
 def test_share_of_voice(pipe):
     rows = [
         mkrow(pipe, "https://inito.com/p", "owned", "current", {}, intent="category", rank=2),

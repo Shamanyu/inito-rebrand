@@ -637,15 +637,227 @@ def diff_only():
     print_diff(mdf)
 
 
+# ---------- LLM brand visibility ----------
+
+LLM_JUDGE_SYSTEM = """You analyze an LLM-generated response about the fertility monitor brand Inito.
+Extract structured signals about brand visibility, accuracy, and framing.
+
+Context: Inito's CURRENT product is the "InSight Wireless Reader" — Wi-Fi enabled, works on iOS AND Android, no phone camera or clip needed.
+The OLD product clipped onto an iPhone and used the phone camera; it was iPhone-only.
+
+Use the analyze_llm_response tool to return your structured findings."""
+
+LLM_JUDGE_TOOL = {
+    "name": "analyze_llm_response",
+    "description": "Extract brand visibility signals from an LLM-generated response about Inito.",
+    "input_schema": {
+        "type": "object",
+        "required": ["inito_mentioned", "inito_recommended", "stale_product_described",
+                     "sentiment_inito", "competitors_named", "competitor_preferred", "confidence"],
+        "properties": {
+            "inito_mentioned": {
+                "type": "boolean",
+                "description": "True if Inito is mentioned by name in the response",
+            },
+            "inito_rank": {
+                "type": ["integer", "null"],
+                "description": "1-based position where Inito first appears among recommended products, null if not mentioned",
+            },
+            "inito_recommended": {
+                "type": "boolean",
+                "description": "True if the response recommends or positively endorses Inito",
+            },
+            "stale_product_described": {
+                "type": "boolean",
+                "description": "True if the response describes Inito as iPhone-only, camera-based, or requiring phone clip — the OLD product",
+            },
+            "sentiment_inito": {
+                "type": "number", "minimum": -1, "maximum": 1,
+                "description": "Sentiment toward Inito: -1 very negative, 0 neutral, 1 very positive",
+            },
+            "competitors_named": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of competitor brand names mentioned (e.g. ['Mira', 'Kegg', 'Clearblue'])",
+            },
+            "competitor_preferred": {
+                "type": ["string", "null"],
+                "description": "The competitor the response most clearly prefers over Inito, or null",
+            },
+            "confidence": {
+                "type": "number", "minimum": 0, "maximum": 1,
+                "description": "Confidence in this analysis",
+            },
+        },
+    },
+}
+
+
+def judge_llm_response(prompt: str, model: str, response_text: str) -> dict:
+    """Classify an LLM-generated response for Inito brand visibility signals."""
+    user = f"PROMPT ASKED: {prompt}\nLLM MODEL: {model}\n\nLLM RESPONSE:\n{response_text[:6000]}"
+    try:
+        resp = claude.messages.create(
+            model=CFG["limits"]["judge_model"], max_tokens=400,
+            system=LLM_JUDGE_SYSTEM,
+            tools=[LLM_JUDGE_TOOL],
+            tool_choice={"type": "tool", "name": "analyze_llm_response"},
+            messages=[{"role": "user", "content": user}])
+        tool_block = next((b for b in resp.content if b.type == "tool_use"), None)
+        if tool_block:
+            return tool_block.input
+        raise ValueError("no tool_use block")
+    except Exception as e:
+        log(f"  llm_judge fallback for {model}/{prompt[:40]}: {e}")
+        mentioned = "inito" in response_text.lower()
+        return {
+            "inito_mentioned": mentioned, "inito_rank": None,
+            "inito_recommended": False, "stale_product_described": False,
+            "sentiment_inito": 0.0, "competitors_named": [], "competitor_preferred": None,
+            "confidence": 0.3, "_fallback": True,
+        }
+
+
+def discover_llm_visibility(models=None) -> list[dict]:
+    """Run all llm_visibility_prompts through bulk-llm-runner for each model.
+    Returns one row per (prompt, model) pair with the raw response and judge verdict."""
+    prompts_cfg = CFG.get("llm_visibility_prompts", [])
+    if not prompts_cfg:
+        log("  no llm_visibility_prompts in config.json — skipping LLM visibility run")
+        return []
+
+    models = models or CFG.get("llm_models", ["gpt-4o-mini"])
+    system_prompt = CFG.get("llm_system_prompt", "")
+    actor_slug = CFG["actors"]["llm_runner"]
+    prompt_strings = [p["prompt"] for p in prompts_cfg]
+    intent_map = {p["prompt"]: p["intent"] for p in prompts_cfg}
+
+    rows = []
+    for model in models:
+        log(f"  LLM visibility: running {len(prompt_strings)} prompts on {model}")
+        run_input = {
+            "prompts": prompt_strings,
+            "model": model,
+        }
+        if system_prompt:
+            run_input["systemPrompt"] = system_prompt
+        try:
+            items = run_actor(actor_slug, run_input, f"llm_runner/{model}")
+        except Exception as e:
+            log(f"  llm_runner/{model} FAILED (skipping): {e}")
+            continue
+
+        for item in items:
+            prompt_text = item.get("prompt") or item.get("input") or ""
+            response_text = item.get("response") or item.get("output") or item.get("answer") or ""
+            if not prompt_text:
+                continue
+            verdict = judge_llm_response(prompt_text, model, response_text)
+            rows.append({
+                "run_date":               RUN_DATE,
+                "model":                  model,
+                "prompt":                 prompt_text,
+                "intent":                 intent_map.get(prompt_text, "unknown"),
+                "response_text":          response_text[:4000],
+                "inito_mentioned":        verdict.get("inito_mentioned", False),
+                "inito_rank":             verdict.get("inito_rank"),
+                "inito_recommended":      verdict.get("inito_recommended", False),
+                "stale_product_described": verdict.get("stale_product_described", False),
+                "sentiment_inito":        verdict.get("sentiment_inito", 0.0),
+                "competitors_named":      json.dumps(verdict.get("competitors_named", [])),
+                "competitor_preferred":   verdict.get("competitor_preferred"),
+                "confidence":             verdict.get("confidence", 0.3),
+            })
+
+    log(f"  LLM visibility: {len(rows)} results collected")
+    return rows
+
+
+def persist_llm(rows: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    snap = DATA / f"llm_visibility_{RUN_DATE}.parquet"
+    df.to_parquet(snap, index=False)
+    hist = DATA / "llm_visibility_history.parquet"
+    if hist.exists():
+        prev = pd.read_parquet(hist)
+        prev = prev[prev["run_date"] != RUN_DATE]
+        df = pd.concat([prev, df], ignore_index=True)
+    df.to_parquet(hist, index=False)
+    pd.DataFrame(rows).to_csv(DATA / "llm_visibility_latest.csv", index=False)
+    log(f"persisted {len(rows)} LLM visibility rows -> {snap.name}")
+    return df
+
+
+def compute_llm_metrics(df_all: pd.DataFrame) -> dict:
+    cur = df_all[df_all["run_date"] == RUN_DATE]
+    if cur.empty:
+        return {}
+
+    metrics = {"run_date": RUN_DATE}
+    metrics["llm_total_responses"] = int(len(cur))
+
+    # per-model breakdown
+    for model, grp in cur.groupby("model"):
+        safe = model.replace("-", "_").replace(".", "_").replace("/", "_")
+        metrics[f"llm_{safe}_mention_rate"]     = round(float(grp["inito_mentioned"].mean()), 3)
+        metrics[f"llm_{safe}_recommended_rate"] = round(float(grp["inito_recommended"].mean()), 3)
+        metrics[f"llm_{safe}_stale_rate"]        = round(float(grp["stale_product_described"].mean()), 3)
+        metrics[f"llm_{safe}_mean_sentiment"]    = round(float(grp["sentiment_inito"].mean()), 3)
+        rank_vals = grp["inito_rank"].dropna()
+        metrics[f"llm_{safe}_mean_rank"]         = round(float(rank_vals.mean()), 2) if len(rank_vals) else None
+
+    # aggregate across all models
+    metrics["llm_mention_rate"]      = round(float(cur["inito_mentioned"].mean()), 3)
+    metrics["llm_recommended_rate"]  = round(float(cur["inito_recommended"].mean()), 3)
+    metrics["llm_stale_rate"]        = round(float(cur["stale_product_described"].mean()), 3)
+    metrics["llm_mean_sentiment"]    = round(float(cur["sentiment_inito"].mean()), 3)
+    rank_all = cur["inito_rank"].dropna()
+    metrics["llm_mean_rank"]         = round(float(rank_all.mean()), 2) if len(rank_all) else None
+
+    mpath = DATA / "llm_metrics.csv"
+    mdf = pd.read_csv(mpath) if mpath.exists() else pd.DataFrame()
+    mdf = pd.concat([mdf[mdf.get("run_date", "") != RUN_DATE] if len(mdf) else mdf,
+                     pd.DataFrame([metrics])], ignore_index=True)
+    mdf.to_csv(mpath, index=False)
+
+    safe_metrics = {k: (None if (v != v if isinstance(v, float) else False) else v)
+                    for k, v in metrics.items()}
+    log(f"LLM visibility metrics: {json.dumps(safe_metrics, indent=2)}")
+    return metrics
+
+
+def run_llm_visibility(models=None):
+    """Standalone: discover + persist + compute LLM visibility metrics."""
+    t0 = time.time()
+    log("LLM VISIBILITY stage 1: discover")
+    rows = discover_llm_visibility(models=models)
+    if not rows:
+        log("no LLM visibility rows — check actor slug and config")
+        return
+    log("LLM VISIBILITY stage 2: persist")
+    df_all = persist_llm(rows)
+    log("LLM VISIBILITY stage 3: metrics")
+    compute_llm_metrics(df_all)
+    log(f"LLM visibility done in {time.time()-t0:.0f}s")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="run the full pipeline")
     ap.add_argument("--no-social", action="store_true", help="skip IG/X/YouTube/TikTok (cheaper)")
     ap.add_argument("--diff-only", action="store_true", help="recompute metrics + diff only")
+    ap.add_argument("--llm", action="store_true",
+                    help="run LLM brand visibility (bulk-llm-runner across configured models)")
+    ap.add_argument("--llm-models", nargs="+", metavar="MODEL",
+                    help="override models for --llm (e.g. gpt-4o-mini gemini-2.0-flash sonar)")
     a = ap.parse_args()
     if a.diff_only:
         diff_only()
+    elif a.llm:
+        run_llm_visibility(models=a.llm_models or None)
     elif a.refresh:
         refresh(a.no_social)
+        if a.llm:
+            run_llm_visibility(models=a.llm_models or None)
     else:
         ap.print_help()

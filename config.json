@@ -27,6 +27,40 @@
   "social_keywords": ["inito", "inito fertility monitor"],
   "youtube_searches": ["inito fertility monitor review", "inito insight wireless reader"],
 
+  "_comment_llm_prompts": "Prompts sent to major LLMs to measure brand visibility. Frozen — add new entries, never edit existing (breaks time series). Intent labels: brand_entity, comparison, use_case, purchase, attribute_probe.",
+  "llm_visibility_prompts": [
+    { "prompt": "Inito",                                          "intent": "brand_entity" },
+    { "prompt": "Inito reviews",                                  "intent": "brand_entity" },
+    { "prompt": "Inito refills",                                  "intent": "brand_entity" },
+    { "prompt": "Inito strips",                                   "intent": "brand_entity" },
+    { "prompt": "How does Inito work?",                           "intent": "brand_entity" },
+    { "prompt": "What comes in the Inito starter pack?",          "intent": "brand_entity" },
+    { "prompt": "Inito vs Mira",                                  "intent": "comparison" },
+    { "prompt": "Inito vs Kegg",                                  "intent": "comparison" },
+    { "prompt": "Inito vs Clearblue",                             "intent": "comparison" },
+    { "prompt": "Inito vs BBT thermometer",                       "intent": "comparison" },
+    { "prompt": "Inito vs OPK strips",                            "intent": "comparison" },
+    { "prompt": "Inito vs blood tests for fertility hormones",     "intent": "comparison" },
+    { "prompt": "Inito vs alternatives for fertility monitoring",  "intent": "comparison" },
+    { "prompt": "Inito for PCOS",                                  "intent": "use_case" },
+    { "prompt": "Is Inito expensive?",                             "intent": "purchase" },
+    { "prompt": "Is Inito worth it?",                              "intent": "purchase" },
+    { "prompt": "Should I buy Inito?",                             "intent": "purchase" },
+    { "prompt": "Does Inito work with HSA or FSA?",                "intent": "purchase" },
+    { "prompt": "Inito on Amazon",                                 "intent": "purchase" },
+    { "prompt": "Does Inito work on Android?",                     "intent": "attribute_probe" },
+    { "prompt": "Is Inito accurate?",                              "intent": "attribute_probe" }
+  ],
+
+  "_comment_llm_models": "Models run via fayoussef/bulk-llm-runner. Use the model identifiers the actor accepts. Check actor docs for current supported values.",
+  "llm_models": [
+    "gpt-4o-mini",
+    "gemini-2.0-flash",
+    "sonar"
+  ],
+
+  "llm_system_prompt": "You are a helpful assistant answering questions about fertility monitors, ovulation tracking, and reproductive health. Answer accurately and helpfully based on your knowledge.",
+
   "_comment_claims": "Heuristic regex (case-insensitive). The LLM judge resolves ambiguity and assigns final status. Add patterns as you see new phrasings.",
   "claim_patterns": {
     "iphone_only": ["only.{0,20}iphone", "iphone.{0,12}only", "only compatible with ios", "iphone 7 and up", "specific iphone models", "compatible with iphone models only"],
@@ -43,7 +77,7 @@
   "competitor_domains": ["miracare.com", "shop.miracare.com", "proovtest.com", "ovul.ai"],
 
   "actors": {
-    "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned. These are the categories you need.",
+    "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned.",
     "serp": "apify/google-search-scraper",
     "bing": "REPLACE_WITH_REAL_SLUG",
     "_comment_bing": "Search apify.com/store for 'bing search', pick most-starred actor, verify input schema matches discover_bing() run_input keys.",
@@ -52,7 +86,8 @@
     "instagram": "apify/instagram-scraper",
     "twitter": "apidojo/tweet-scraper",
     "youtube": "streamers/youtube-scraper",
-    "tiktok": "clockworks/free-tiktok-scraper"
+    "tiktok": "clockworks/free-tiktok-scraper",
+    "llm_runner": "fayoussef/bulk-llm-runner"
   },
 
   "limits": {
