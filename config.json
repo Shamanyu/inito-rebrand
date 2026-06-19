@@ -45,8 +45,8 @@
   "actors": {
     "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned. These are the categories you need.",
     "serp": "apify/google-search-scraper",
-    "bing": "apify/bing-search-scraper",
-    "news": "apify/google-news-scraper",
+    "bing": "REPLACE_WITH_REAL_SLUG",
+    "_comment_bing": "Search apify.com/store for 'bing search', pick most-starred actor, verify input schema matches discover_bing() run_input keys.",
     "content": "apify/website-content-crawler",
     "reddit": "trudax/reddit-scraper-lite",
     "instagram": "apify/instagram-scraper",

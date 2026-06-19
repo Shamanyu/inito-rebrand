@@ -130,25 +130,28 @@ def discover_bing() -> list[dict]:
     return out
 
 def discover_news() -> list[dict]:
-    """Google News — press/syndicated content is a major stale-content vector."""
+    """Google News via the same SERP actor with tbm=nws — press/syndicated stale content."""
     qmap = {c["q"]: c["intent"] for c in CFG["queries"]}
     run_input = {
         "queries": "\n".join(qmap.keys()),
-        "maxArticlesPerQuery": CFG["limits"].get("news_max_per_query", 20),
+        "resultsPerPage": CFG["limits"].get("news_max_per_query", 20),
+        "maxPagesPerQuery": 1,
         "countryCode": CFG["market"]["countryCode"],
         "languageCode": CFG["market"]["languageCode"],
+        "mobileResults": False,
+        "tbm": "nws",  # switches google-search-scraper to News tab
     }
     out = []
     try:
-        for item in run_actor(CFG["actors"]["news"], run_input, "news"):
-            sq = item.get("searchQuery") or item.get("query") or ""
+        for item in run_actor(CFG["actors"]["serp"], run_input, "news"):
+            sq = item.get("searchQuery")
             q = (sq.get("term") if isinstance(sq, dict) else sq) or ""
             intent = qmap.get(q, "unknown")
-            for r in item.get("articles", [item]):
-                url = r.get("url") or r.get("link")
+            for rank, r in enumerate(item.get("organicResults", []), 1):
+                url = r.get("url")
                 if url:
                     out.append({"url": url, "platform": "news", "query": q, "intent": intent,
-                                "rank": 0, "title": r.get("title", ""),
+                                "rank": rank, "title": r.get("title", ""),
                                 "snippet": r.get("description", "")})
     except Exception as e:
         log(f"  news skipped: {e}")
