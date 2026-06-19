@@ -13,6 +13,7 @@ Env (.env):  APIFY_TOKEN, ANTHROPIC_API_KEY
 """
 
 import argparse, json, os, re, sys, time, datetime as dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 
@@ -56,8 +57,8 @@ def normalize_url(u: str) -> str:
 def domain_of(u: str) -> str:
     return urlsplit(u).netloc.lower().removeprefix("www.")
 
-def run_actor(actor_id: str, run_input: dict, label: str, retries: int = 3) -> list:
-    """Call an actor, return its dataset items. Retries with exponential backoff on failure."""
+def run_actor(actor_id: str, run_input: dict, label: str, retries: int = 1) -> list:
+    """Call an actor, return its dataset items. Fails fast — no sleep between retries."""
     for attempt in range(1, retries + 1):
         try:
             log(f"  actor {actor_id} ({label}) starting…")
@@ -68,9 +69,7 @@ def run_actor(actor_id: str, run_input: dict, label: str, retries: int = 3) -> l
         except Exception as e:
             if attempt == retries:
                 raise
-            wait = 2 ** attempt
-            log(f"  actor {actor_id} ({label}) attempt {attempt} failed: {e}. Retrying in {wait}s…")
-            time.sleep(wait)
+            log(f"  actor {actor_id} ({label}) attempt {attempt} failed: {e}. Retrying…")
     return []
 
 
@@ -161,7 +160,8 @@ def discover_reddit() -> list[dict]:
     # NOTE: confirm input keys against your chosen Reddit actor's page. trudax/reddit-scraper-lite
     # accepts `searches` + `maxItems`. The official apify/reddit-scraper uses `searchTerms`/`startUrls`.
     run_input = {"searches": CFG["reddit_searches"], "maxItems": CFG["limits"]["reddit_max_items"],
-                 "type": "posts", "sort": "relevance", "proxy": {"useApifyProxy": True}}
+                 "type": "posts", "sort": "relevance",
+                 "proxy": {"useApifyProxy": True, "apifyProxyCountry": "US"}}
     out = []
     for it in run_actor(CFG["actors"]["reddit"], run_input, "reddit"):
         url = it.get("url") or it.get("link")
@@ -653,7 +653,8 @@ LLM_JUDGE_TOOL = {
     "input_schema": {
         "type": "object",
         "required": ["inito_mentioned", "inito_recommended", "stale_product_described",
-                     "sentiment_inito", "competitors_named", "competitor_preferred", "confidence"],
+                     "stale_excerpt", "sources_cited", "sentiment_inito",
+                     "competitors_named", "competitor_preferred", "confidence"],
         "properties": {
             "inito_mentioned": {
                 "type": "boolean",
@@ -670,6 +671,15 @@ LLM_JUDGE_TOOL = {
             "stale_product_described": {
                 "type": "boolean",
                 "description": "True if the response describes Inito as iPhone-only, camera-based, or requiring phone clip — the OLD product",
+            },
+            "stale_excerpt": {
+                "type": ["string", "null"],
+                "description": "The exact sentence or phrase from the response that contains the stale claim, or null if none. Quote verbatim.",
+            },
+            "sources_cited": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "All URLs or domain names cited as sources in the response (extract from markdown links, footnotes, inline citations). E.g. ['https://fertilitys.com/inito-review', 'https://leafsnap.com/inito']",
             },
             "sentiment_inito": {
                 "type": "number", "minimum": -1, "maximum": 1,
@@ -710,9 +720,12 @@ def judge_llm_response(prompt: str, model: str, response_text: str) -> dict:
     except Exception as e:
         log(f"  llm_judge fallback for {model}/{prompt[:40]}: {e}")
         mentioned = "inito" in response_text.lower()
+        # extract URLs from response text as fallback source list
+        urls = re.findall(r'https?://[^\s\)\]\"\'>,]+', response_text)
         return {
             "inito_mentioned": mentioned, "inito_rank": None,
             "inito_recommended": False, "stale_product_described": False,
+            "stale_excerpt": None, "sources_cited": urls[:10],
             "sentiment_inito": 0.0, "competitors_named": [], "competitor_preferred": None,
             "confidence": 0.3, "_fallback": True,
         }
@@ -745,9 +758,8 @@ def _mean_ci(values: list, z: float = 1.96):
 def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
     """Run all llm_visibility_prompts through bulk-llm-runner for each model × num_runs.
 
-    num_runs repeated calls with datacenter proxies sample response variance (LLM temperature +
-    location-sensitive web-search results for Perplexity/Gemini). Each row gets a run_index so
-    compute_llm_metrics() can calculate Wilson CIs across the pooled observations.
+    Models run in parallel (ThreadPoolExecutor). Resume logic skips (model, run_index)
+    combos already persisted for today. Failures log one error row per prompt.
     """
     prompts_cfg = CFG.get("llm_visibility_prompts", [])
     if not prompts_cfg:
@@ -758,52 +770,104 @@ def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
     num_runs = num_runs or CFG.get("llm_num_runs", 1)
     system_prompt = CFG.get("llm_system_prompt", "")
     proxy_group = CFG.get("llm_proxy_group", "DATACENTER")
+    proxy_country = CFG.get("proxy_country", "US")
     actor_slug = CFG["actors"]["llm_runner"]
     prompt_strings = [p["prompt"] for p in prompts_cfg]
     intent_map = {p["prompt"]: p["intent"] for p in prompts_cfg}
 
-    rows = []
-    for model in models:
-        for run_idx in range(1, num_runs + 1):
-            log(f"  LLM visibility: {model} run {run_idx}/{num_runs} ({len(prompt_strings)} prompts)")
-            run_input = {
-                "prompts": prompt_strings,
-                "model": model,
-                "proxyConfiguration": {
-                    "useApifyProxy": True,
-                    "apifyProxyGroups": [proxy_group],
-                },
-            }
-            if system_prompt:
-                run_input["systemPrompt"] = system_prompt
-            try:
-                items = run_actor(actor_slug, run_input, f"llm/{model}/run{run_idx}")
-            except Exception as e:
-                log(f"  llm/{model}/run{run_idx} FAILED (skipping): {e}")
-                continue
+    # Resume: load already-completed (model, run_index) from today's history
+    completed = set()
+    hist_path = DATA / "llm_visibility_history.parquet"
+    if hist_path.exists():
+        try:
+            prev = pd.read_parquet(hist_path)
+            today = prev[prev["run_date"] == RUN_DATE]
+            # only count rows that have real data (not prior error rows)
+            real = today[today.get("status", pd.Series(dtype=str)) != "error"] if "status" in today.columns else today
+            real = today[today["inito_mentioned"].notna()] if "inito_mentioned" in today.columns else today
+            for _, r in real.iterrows():
+                completed.add((str(r["model"]), int(r.get("run_index", 1))))
+            if completed:
+                log(f"  resume: {len(completed)} (model, run_index) combos already done today — skipping")
+        except Exception as exc:
+            log(f"  resume check failed (will re-run all): {exc}")
 
-            for item in items:
-                prompt_text = item.get("prompt") or item.get("input") or ""
-                response_text = item.get("response") or item.get("output") or item.get("answer") or ""
-                if not prompt_text:
-                    continue
-                verdict = judge_llm_response(prompt_text, model, response_text)
-                rows.append({
-                    "run_date":                RUN_DATE,
-                    "run_index":               run_idx,
-                    "model":                   model,
-                    "prompt":                  prompt_text,
-                    "intent":                  intent_map.get(prompt_text, "unknown"),
-                    "response_text":           response_text[:4000],
-                    "inito_mentioned":         verdict.get("inito_mentioned", False),
-                    "inito_rank":              verdict.get("inito_rank"),
-                    "inito_recommended":       verdict.get("inito_recommended", False),
-                    "stale_product_described": verdict.get("stale_product_described", False),
-                    "sentiment_inito":         verdict.get("sentiment_inito", 0.0),
-                    "competitors_named":       json.dumps(verdict.get("competitors_named", [])),
-                    "competitor_preferred":    verdict.get("competitor_preferred"),
-                    "confidence":              verdict.get("confidence", 0.3),
-                })
+    def _run_one(model, run_idx):
+        if (model, run_idx) in completed:
+            log(f"  LLM visibility: {model} run {run_idx} already done — skipping")
+            return []
+
+        log(f"  LLM visibility: {model} run {run_idx}/{num_runs} ({len(prompt_strings)} prompts)")
+        run_input = {
+            "prompts": prompt_strings,
+            "model": model,
+            "proxyConfiguration": {
+                "useApifyProxy": True,
+                "apifyProxyGroups": [proxy_group],
+                "apifyProxyCountry": proxy_country,
+            },
+        }
+        if system_prompt:
+            run_input["systemPrompt"] = system_prompt
+
+        try:
+            items = run_actor(actor_slug, run_input, f"llm/{model}/run{run_idx}")
+        except Exception as e:
+            log(f"  llm/{model}/run{run_idx} FAILED: {e}")
+            # one error row per prompt so failures are visible in the sheet
+            return [{
+                "run_date": RUN_DATE, "run_index": run_idx, "model": model,
+                "prompt": p, "intent": intent_map.get(p, "unknown"),
+                "status": "error", "error": str(e)[:300],
+                "response_text": None, "inito_mentioned": None,
+                "inito_rank": None, "inito_recommended": None,
+                "stale_product_described": None, "stale_excerpt": None,
+                "sources_cited": "[]", "sentiment_inito": None,
+                "competitors_named": "[]", "competitor_preferred": None,
+                "confidence": None,
+            } for p in prompt_strings]
+
+        result = []
+        for item in items:
+            prompt_text = item.get("prompt") or item.get("input") or ""
+            response_text = item.get("response") or item.get("output") or item.get("answer") or ""
+            if not prompt_text:
+                continue
+            verdict = judge_llm_response(prompt_text, model, response_text)
+            inline_urls = re.findall(r'https?://[^\s\)\]\"\'>,]+', response_text)
+            judge_sources = verdict.get("sources_cited") or []
+            all_sources = list(dict.fromkeys(judge_sources + inline_urls))[:15]
+            result.append({
+                "run_date":                RUN_DATE,
+                "run_index":               run_idx,
+                "model":                   model,
+                "prompt":                  prompt_text,
+                "intent":                  intent_map.get(prompt_text, "unknown"),
+                "response_text":           response_text[:4000],
+                "inito_mentioned":         verdict.get("inito_mentioned", False),
+                "inito_rank":              verdict.get("inito_rank"),
+                "inito_recommended":       verdict.get("inito_recommended", False),
+                "stale_product_described": verdict.get("stale_product_described", False),
+                "stale_excerpt":           verdict.get("stale_excerpt"),
+                "sources_cited":           json.dumps(all_sources),
+                "sentiment_inito":         verdict.get("sentiment_inito", 0.0),
+                "competitors_named":       json.dumps(verdict.get("competitors_named", [])),
+                "competitor_preferred":    verdict.get("competitor_preferred"),
+                "confidence":              verdict.get("confidence", 0.3),
+            })
+        return result
+
+    # run all model × run_index jobs in parallel
+    jobs = [(m, r) for m in models for r in range(1, num_runs + 1)]
+    rows = []
+    with ThreadPoolExecutor(max_workers=min(len(jobs), 10)) as ex:
+        futures = {ex.submit(_run_one, m, r): (m, r) for m, r in jobs}
+        for fut in as_completed(futures):
+            m, r = futures[fut]
+            try:
+                rows.extend(fut.result())
+            except Exception as e:
+                log(f"  llm/{m}/run{r} unexpected thread error: {e}")
 
     log(f"  LLM visibility: {len(rows)} total observations ({num_runs} run(s) × {len(models)} model(s))")
     return rows

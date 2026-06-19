@@ -55,14 +55,16 @@
   "_comment_llm_models": "Models run via fayoussef/bulk-llm-runner. Use the model identifiers the actor accepts. Check actor docs for current supported values.",
   "_comment_llm_models_rationale": "Consumer-default models: what a typical user actually gets when they open ChatGPT, Gemini, Perplexity, Claude. Not mini/lite variants.",
   "llm_models": [
-    "openai/gpt-4o",
-    "google/gemini-2.5-flash",
+    "openai/gpt-5",
+    "google/gemini-2.5-pro",
     "perplexity/sonar-pro",
-    "anthropic/claude-sonnet-4.5"
+    "anthropic/claude-sonnet-4.5",
+    "x-ai/grok-4.3"
   ],
   "_comment_llm_sampling": "num_runs: how many times to repeat each (model × prompt batch) with a fresh datacenter IP. Each run is an independent sample — we pool across runs to compute Wilson CIs. 3 runs = 63 obs/model for 21 prompts, enough for ~±10pp CI width. proxy_group: DATACENTER for speed/cost; switch to RESIDENTIAL if LLMs start returning geo-blocked responses.",
-  "llm_num_runs": 3,
+  "llm_num_runs": 1,
   "llm_proxy_group": "DATACENTER",
+  "proxy_country": "US",
 
   "llm_system_prompt": "You are a helpful assistant answering questions about fertility monitors, ovulation tracking, and reproductive health. Answer accurately and helpfully based on your knowledge.",
 
