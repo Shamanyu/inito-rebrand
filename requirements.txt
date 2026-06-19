@@ -2,6 +2,7 @@ apify-client>=1.7
 anthropic>=0.40
 pandas>=2.2
 pyarrow>=15.0
+scikit-learn>=1.4
 
 # dev
 pytest>=8.0

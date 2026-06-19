@@ -20,11 +20,13 @@ def pipe(tmp_path, monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "DATA", tmp_path)
+    # point fetch cache path into tmp dir so tests don't touch real cache
+    monkeypatch.setattr(mod, "FETCH_CACHE_PATH", tmp_path / "fetch_cache.parquet")
     return mod
 
 
 def mkrow(pipe, url, ownership, status, claims, sentiment=0.0, framing=False,
-          intent="brand_entity", rank=1, platform="web"):
+          intent="brand_entity", rank=1, platform="web", confidence=0.9):
     return {
         "url": url, "domain": pipe.domain_of(url), "platform": platform, "query": "q",
         "intent": intent, "rank": rank, "ownership": ownership, "status": status,
@@ -34,5 +36,5 @@ def mkrow(pipe, url, ownership, status, claims, sentiment=0.0, framing=False,
         "claim_camera_dependent": claims.get("camera_dependent", False),
         "claim_no_android": claims.get("no_android", False),
         "price_mentioned": None, "sentiment_inito": sentiment,
-        "competitor_framing": framing, "title": "",
+        "competitor_framing": framing, "confidence": confidence, "title": "",
     }

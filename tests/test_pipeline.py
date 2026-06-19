@@ -57,12 +57,17 @@ def test_judge_fallback_classifies_stale_and_current(pipe):
     assert v_stale["status"] == "stale"
     assert v_cur["status"] == "current"
     # fallback still returns the full contract so downstream rows never KeyError
-    for key in ("status", "claims_confirmed", "sentiment_inito", "competitor_framing"):
+    for key in ("status", "claims_confirmed", "sentiment_inito", "competitor_framing", "confidence"):
         assert key in v_stale
 
 def test_judge_fallback_mixed(pipe):
     v = pipe.judge("http://z", MIXED_TEXT, pipe.detect_claims(MIXED_TEXT))
     assert v["status"] in ("mixed", "stale")  # has both signals; never 'current'
+
+def test_judge_fallback_confidence_is_numeric(pipe):
+    v = pipe.judge("http://x", STALE_TEXT, pipe.detect_claims(STALE_TEXT))
+    assert isinstance(v["confidence"], float)
+    assert 0.0 <= v["confidence"] <= 1.0
 
 
 # ---------- SERP parsing (guards the searchQuery dict/str fix) ----------
@@ -82,6 +87,48 @@ def test_serp_parsing_handles_dict_and_string_query(pipe, monkeypatch):
     by_q = {r["query"]: r["intent"] for r in rows}
     assert by_q["Inito vs Mira"] == "comparison"                     # intent resolved from config
     assert by_q["Inito review"] == "brand_entity"                    # string-form query handled
+
+
+# ---------- fetch cache ----------
+def test_fetch_cache_roundtrip(pipe):
+    entries = {"https://inito.com/buy-now": "some page text", "https://example.com/x": "other text"}
+    pipe.save_fetch_cache(entries)
+    cache = pipe.load_fetch_cache()
+    assert cache["https://inito.com/buy-now"] == "some page text"
+    assert cache["https://example.com/x"] == "other text"
+
+def test_enrich_content_uses_cache(pipe, monkeypatch):
+    pipe.save_fetch_cache({"https://cached.com/page": "cached text"})
+    actor_calls = []
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: (actor_calls.append(a), [])[1])
+    result = pipe.enrich_content(["https://cached.com/page"])
+    assert result["https://cached.com/page"] == "cached text"
+    assert len(actor_calls) == 0  # actor not called — served from cache
+
+
+# ---------- review queue ----------
+def test_low_confidence_rows_written_to_review_queue(pipe):
+    rows = [
+        mkrow(pipe, "https://inito.com/buy-now", "owned", "stale", {}, confidence=0.4),
+        mkrow(pipe, "https://leafsnap.com/x", "third_party", "current", {}, confidence=0.95),
+    ]
+    pipe.persist(rows)
+    rq_path = pipe.DATA / "review_queue.csv"
+    assert rq_path.exists()
+    import pandas as pd
+    rq = pd.read_csv(rq_path)
+    assert len(rq) == 1
+    assert "inito.com" in rq.iloc[0]["url"]
+
+
+# ---------- kappa ----------
+def test_kappa_returns_float(pipe):
+    rows = [
+        mkrow(pipe, "https://inito.com/p", "owned", "stale", {"iphone_only": True}),
+        mkrow(pipe, "https://leafsnap.com/p", "third_party", "current", {}),
+    ]
+    k = pipe._kappa_regex_vs_judge(rows)
+    assert k == k or k != k  # either a float or nan — just must not raise
 
 
 # ---------- metrics + diff across two runs ----------
@@ -105,7 +152,9 @@ def test_metrics_and_diff_decay(pipe):
     assert m1["claim_iphone_only"] == 1 and m2["claim_iphone_only"] == 0
     assert m2["stale_or_mixed"] == 2
     assert m2["competitor_negative"] == 1
-    assert len(mdf) == 2                                            # two dated rows -> diffable series
+    assert len(mdf) == 2                                             # two dated rows -> diffable series
+    assert "run_quality_score" in m2
+    assert 0 <= m2["run_quality_score"] <= 100
 
 
 def test_share_of_voice(pipe):

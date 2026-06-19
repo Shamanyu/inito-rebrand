@@ -45,19 +45,25 @@
   "actors": {
     "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned. These are the categories you need.",
     "serp": "apify/google-search-scraper",
+    "bing": "apify/bing-search-scraper",
+    "news": "apify/google-news-scraper",
     "content": "apify/website-content-crawler",
     "reddit": "trudax/reddit-scraper-lite",
     "instagram": "apify/instagram-scraper",
     "twitter": "apidojo/tweet-scraper",
-    "youtube": "streamers/youtube-scraper"
+    "youtube": "streamers/youtube-scraper",
+    "tiktok": "clockworks/free-tiktok-scraper"
   },
 
   "limits": {
     "serp_results_per_query": 100,
     "serp_pages_per_query": 1,
+    "bing_results_per_query": 10,
+    "news_max_per_query": 20,
     "reddit_max_items": 120,
     "social_max_items": 80,
     "youtube_max_items": 40,
+    "tiktok_max_items": 50,
     "judge_model": "claude-haiku-4-5-20251001",
     "_comment_model": "Cheapest model, right for high-volume classification. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
   }
