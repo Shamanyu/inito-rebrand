@@ -60,7 +60,7 @@
     "perplexity/sonar-pro",
     "anthropic/claude-sonnet-4.5"
   ],
-  "_comment_llm_sampling": "num_runs: how many times to repeat each (model × prompt batch) with a fresh datacenter IP. Each run is an independent sample — we pool across runs to compute Wilson CIs. 3 runs = 63 obs/model for 21 prompts, enough for ~±10pp CI width. proxy_group: DATACENTER for speed/cost; switch to RESIDENTIAL if LLMs start returning geo-blocked responses.",
+  "_comment_llm_sampling": "num_runs: how many times to repeat each (model × prompt batch) with a fresh datacenter IP. Each run is an independent sample — we pool across runs to compute Wilson CIs. proxy_group: DATACENTER for speed/cost; switch to RESIDENTIAL if LLMs start returning geo-blocked responses. NOTE: perplexity/sonar-pro always does live web search via API — identical to the Perplexity web UI. Web scrapers for Perplexity are Cloudflare-blocked.",
   "llm_num_runs": 1,
   "llm_proxy_group": "DATACENTER",
   "proxy_country": "US",
@@ -93,7 +93,12 @@
     "twitter": "apidojo/tweet-scraper",
     "youtube": "streamers/youtube-scraper",
     "tiktok": "clockworks/free-tiktok-scraper",
-    "llm_runner": "fayoussef/bulk-llm-runner"
+    "llm_runner": "fayoussef/bulk-llm-runner",
+    "_comment_llm_runner": "Bulk API caller for ChatGPT (gpt-5) and Claude. Perplexity and Google AI Mode have dedicated web-interface actors below.",
+    "perplexity_web": "zhorex/perplexity-ai-scraper",
+    "_comment_perplexity_web": "Headless browser scraper — uses the real Perplexity.ai web UI, no API key needed. $0.02/query. brand_monitor mode pre-extracts mention/position/competitors. Input: queries (array), mode, brandName, maxQueries, waitTimeout, proxyConfiguration.",
+    "google_ai_mode": "scrape.badger/google-ai-mode-scraper",
+    "_comment_google_ai_mode": "Scrapes Google AI Mode (udm=50) — full-page Gemini-powered generative answer, stronger signal than AI Overview. $0.005/query. Input: queries (newline-separated string), gl, hl. Output: query, text_blocks [{type, snippet}], references [{title, link, snippet}]."
   },
 
   "limits": {
@@ -105,6 +110,7 @@
     "social_max_items": 80,
     "youtube_max_items": 40,
     "tiktok_max_items": 50,
+    "perplexity_wait_timeout": 60,
     "judge_model": "claude-haiku-4-5-20251001",
     "_comment_model": "Cheapest model, right for high-volume classification. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
   }

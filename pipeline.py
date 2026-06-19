@@ -75,7 +75,9 @@ def run_actor(actor_id: str, run_input: dict, label: str, retries: int = 1) -> l
 
 # ---------- stage 1: discover ----------
 def discover_serp() -> list[dict]:
-    """Google SERP via apify/google-search-scraper. Captures organic rank + AI Overview."""
+    """Google SERP via apify/google-search-scraper.
+    Captures organic results, AI Overview, ChatGPT Search panel, and Perplexity panel.
+    """
     qmap = {c["q"]: c["intent"] for c in CFG["queries"]}
     run_input = {
         "queries": "\n".join(qmap.keys()),
@@ -96,12 +98,26 @@ def discover_serp() -> list[dict]:
                 continue
             out.append({"url": url, "platform": "web", "query": q, "intent": intent,
                         "rank": rank, "title": r.get("title", ""), "snippet": r.get("description", "")})
-        # AI Overview text stored verbatim as a pseudo-URL so it's tracked and judged per run
+        # Google AI Overview (Gemini-powered)
         ai = item.get("aiOverview") or item.get("aiOverviewText")
         if ai:
             out.append({"url": f"aioverview::{q}", "platform": "ai_overview", "query": q,
-                        "intent": intent, "rank": 0, "title": "AI Overview",
+                        "intent": intent, "rank": 0, "title": "Google AI Overview",
                         "snippet": ai if isinstance(ai, str) else json.dumps(ai)[:4000]})
+        # ChatGPT Search panel (appears in Google SERP on paid plans)
+        for cgpt in (item.get("chatGptSearchResults") or []):
+            text = cgpt.get("text") or cgpt.get("answer") or ""
+            if text:
+                out.append({"url": f"chatgptsearch::{q}", "platform": "chatgpt_search", "query": q,
+                            "intent": intent, "rank": 0, "title": "ChatGPT Search Panel",
+                            "snippet": text[:4000]})
+        # Perplexity panel (appears in Google SERP on paid plans)
+        for px in (item.get("perplexitySearchResults") or []):
+            text = px.get("text") or px.get("answer") or ""
+            if text:
+                out.append({"url": f"perplexitysearch::{q}", "platform": "perplexity_search", "query": q,
+                            "intent": intent, "rank": 0, "title": "Perplexity Search Panel",
+                            "snippet": text[:4000]})
     return out
 
 def discover_bing() -> list[dict]:
@@ -127,6 +143,92 @@ def discover_bing() -> list[dict]:
     except Exception as e:
         log(f"  bing skipped: {e}")
     return out
+
+def discover_perplexity_web() -> list[dict]:
+    """Perplexity AI via zhorex/perplexity-ai-scraper — headless browser, true web interface.
+    Returns one row per query with the full AI answer + cited sources.
+    Uses brand_monitor mode so mention/position/competitor signals are pre-extracted by the actor.
+    """
+    queries = [c["q"] for c in CFG["queries"]]
+    qmap = {c["q"]: c["intent"] for c in CFG["queries"]}
+    run_input = {
+        "queries": queries,
+        "mode": "brand_monitor",
+        "brandName": "Inito",
+        "maxQueries": len(queries),
+        "waitTimeout": CFG["limits"].get("perplexity_wait_timeout", 90),
+        # No proxyConfiguration — actor uses its own built-in residential proxy pool.
+        # Passing Apify datacenter proxies causes Perplexity to block the requests.
+    }
+    out = []
+    try:
+        items = run_actor(CFG["actors"]["perplexity_web"], run_input, "perplexity_web")
+    except Exception as e:
+        log(f"  perplexity_web FAILED: {e}")
+        return []
+    for it in items:
+        q = it.get("query", "")
+        answer = it.get("answer", "")
+        sources = it.get("sources") or []
+        # sources is a list of {position, title, url, domain, snippet}
+        source_urls = [s.get("url", "") for s in sources if s.get("url")]
+        out.append({
+            "url": f"perplexity::{q}",
+            "platform": "perplexity_web",
+            "query": q,
+            "intent": qmap.get(q, "unknown"),
+            "rank": 0,
+            "title": "Perplexity Answer",
+            "snippet": answer[:4000],
+            # actor-extracted brand signals (pre-computed, supplement our judge)
+            "_perplexity_mentioned": it.get("mentioned"),
+            "_perplexity_position": it.get("position"),
+            "_perplexity_competitors": it.get("competitorsMentioned", []),
+            "_perplexity_sources": json.dumps(source_urls[:15]),
+            "_perplexity_related": json.dumps(it.get("relatedQuestions", [])[:5]),
+        })
+    return out
+
+
+def discover_google_ai_mode() -> list[dict]:
+    """Google AI Mode (udm=50) via scrape.badger/google-ai-mode-scraper.
+    This is the full-page Gemini-powered generative answer — stronger signal than AI Overview.
+    Input: one query per line. Output: text_blocks + references per query.
+    """
+    queries = [c["q"] for c in CFG["queries"]]
+    qmap = {c["q"]: c["intent"] for c in CFG["queries"]}
+    run_input = {
+        "queries": "\n".join(queries),
+        "gl": CFG["market"]["countryCode"],
+        "hl": CFG["market"]["languageCode"],
+    }
+    out = []
+    try:
+        items = run_actor(CFG["actors"]["google_ai_mode"], run_input, "google_ai_mode")
+    except Exception as e:
+        log(f"  google_ai_mode FAILED: {e}")
+        return []
+    for it in items:
+        q = it.get("query", "")
+        blocks = it.get("text_blocks") or []
+        refs = it.get("references") or []
+        # flatten text_blocks into a single answer string
+        answer = " ".join(b.get("snippet", "") for b in blocks if b.get("snippet"))
+        if not answer:
+            continue  # Google didn't serve AI Mode for this query
+        source_urls = [r.get("link", "") for r in refs if r.get("link")]
+        out.append({
+            "url": f"googleaimode::{q}",
+            "platform": "google_ai_mode",
+            "query": q,
+            "intent": qmap.get(q, "unknown"),
+            "rank": 0,
+            "title": "Google AI Mode (Gemini)",
+            "snippet": answer[:4000],
+            "_googleai_sources": json.dumps(source_urls[:15]),
+        })
+    return out
+
 
 def discover_news() -> list[dict]:
     """Google News via the same SERP actor with tbm=nws — press/syndicated stale content."""
@@ -572,10 +674,11 @@ def refresh(no_social: bool):
     t0 = time.time()
     log("STAGE 1 discover")
     recs = (
-        _safe_discover(discover_serp,  "serp")
-        + _safe_discover(discover_bing,  "bing")
-        + _safe_discover(discover_news,  "news")
-        + _safe_discover(discover_reddit, "reddit")
+        _safe_discover(discover_serp,              "serp")
+        + _safe_discover(discover_bing,            "bing")
+        + _safe_discover(discover_news,            "news")
+        + _safe_discover(discover_reddit,          "reddit")
+        + _safe_discover(discover_google_ai_mode,  "google_ai_mode")
     )
     if not no_social:
         recs += _safe_discover(discover_social, "social")
@@ -756,7 +859,9 @@ def _mean_ci(values: list, z: float = 1.96):
 
 
 def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
-    """Run all llm_visibility_prompts through bulk-llm-runner for each model × num_runs.
+    """Run all llm_visibility_prompts through bulk-llm-runner (ChatGPT + Claude via API).
+    Perplexity is handled by discover_perplexity_web() instead (true web interface).
+    Google AI Mode / Gemini is handled by discover_google_ai_mode().
 
     Models run in parallel (ThreadPoolExecutor). Resume logic skips (model, run_index)
     combos already persisted for today. Failures log one error row per prompt.
@@ -766,7 +871,9 @@ def discover_llm_visibility(models=None, num_runs=None) -> list[dict]:
         log("  no llm_visibility_prompts in config.json — skipping LLM visibility run")
         return []
 
-    models = models or CFG.get("llm_models", ["openai/gpt-4o"])
+    # perplexity/sonar-pro stays here: its API always does live web search, making it
+    # equivalent to the Perplexity web UI. Web-interface scrapers are Cloudflare-blocked.
+    models = models or CFG.get("llm_models", ["openai/gpt-5"])
     num_runs = num_runs or CFG.get("llm_num_runs", 1)
     system_prompt = CFG.get("llm_system_prompt", "")
     proxy_group = CFG.get("llm_proxy_group", "DATACENTER")
@@ -1078,14 +1185,96 @@ def compute_llm_metrics(df_all: pd.DataFrame) -> dict:
     return metrics
 
 
+def _perplexity_web_to_llm_rows(items: list[dict]) -> list[dict]:
+    """Convert discover_perplexity_web() records into llm_visibility row format."""
+    rows = []
+    for it in items:
+        q = it.get("query", "")
+        answer = it.get("snippet", "")
+        if not answer:
+            continue
+        verdict = judge_llm_response(q, "perplexity/web", answer)
+        # merge actor-pre-extracted sources with judge sources
+        actor_sources = json.loads(it.get("_perplexity_sources", "[]"))
+        judge_sources = verdict.get("sources_cited") or []
+        inline_urls = re.findall(r'https?://[^\s\)\]\"\'>,]+', answer)
+        all_sources = list(dict.fromkeys(judge_sources + actor_sources + inline_urls))[:15]
+        rows.append({
+            "run_date": RUN_DATE, "run_index": 1, "model": "perplexity/web",
+            "prompt": q, "intent": it.get("intent", "unknown"),
+            "response_text": answer[:4000],
+            "inito_mentioned": verdict.get("inito_mentioned",
+                                it.get("_perplexity_mentioned") or False),
+            "inito_rank": verdict.get("inito_rank"),
+            "inito_recommended": verdict.get("inito_recommended", False),
+            "stale_product_described": verdict.get("stale_product_described", False),
+            "stale_excerpt": verdict.get("stale_excerpt"),
+            "sources_cited": json.dumps(all_sources),
+            "sentiment_inito": verdict.get("sentiment_inito", 0.0),
+            "competitors_named": json.dumps(verdict.get("competitors_named",
+                                    it.get("_perplexity_competitors", []))),
+            "competitor_preferred": verdict.get("competitor_preferred"),
+            "confidence": verdict.get("confidence", 0.3),
+        })
+    return rows
+
+
+def _google_ai_mode_to_llm_rows(items: list[dict]) -> list[dict]:
+    """Convert discover_google_ai_mode() records into llm_visibility row format."""
+    rows = []
+    for it in items:
+        q = it.get("query", "")
+        answer = it.get("snippet", "")
+        if not answer:
+            continue
+        verdict = judge_llm_response(q, "google/ai-mode", answer)
+        actor_sources = json.loads(it.get("_googleai_sources", "[]"))
+        judge_sources = verdict.get("sources_cited") or []
+        inline_urls = re.findall(r'https?://[^\s\)\]\"\'>,]+', answer)
+        all_sources = list(dict.fromkeys(judge_sources + actor_sources + inline_urls))[:15]
+        rows.append({
+            "run_date": RUN_DATE, "run_index": 1, "model": "google/ai-mode",
+            "prompt": q, "intent": it.get("intent", "unknown"),
+            "response_text": answer[:4000],
+            "inito_mentioned": verdict.get("inito_mentioned", False),
+            "inito_rank": verdict.get("inito_rank"),
+            "inito_recommended": verdict.get("inito_recommended", False),
+            "stale_product_described": verdict.get("stale_product_described", False),
+            "stale_excerpt": verdict.get("stale_excerpt"),
+            "sources_cited": json.dumps(all_sources),
+            "sentiment_inito": verdict.get("sentiment_inito", 0.0),
+            "competitors_named": json.dumps(verdict.get("competitors_named", [])),
+            "competitor_preferred": verdict.get("competitor_preferred"),
+            "confidence": verdict.get("confidence", 0.3),
+        })
+    return rows
+
+
 def run_llm_visibility(models=None):
-    """Standalone: discover + persist + compute LLM visibility metrics."""
+    """Standalone: discover + persist + compute LLM visibility metrics.
+
+    Sources:
+      - fayoussef/bulk-llm-runner  → ChatGPT (gpt-5), Gemini, Perplexity sonar-pro (live search),
+                                     Claude. All 4 via API; Perplexity's API always searches live.
+      - scrape.badger/google-ai-mode-scraper → Google AI Mode (Gemini-powered, best-effort;
+                                     503s are transient, actor is wrapped in try/except)
+    Note: Perplexity web-interface scraper (zhorex) is blocked by Cloudflare; API is equivalent.
+    """
     t0 = time.time()
-    log("LLM VISIBILITY stage 1: discover")
-    rows = discover_llm_visibility(models=models)
+    rows = []
+
+    log("LLM VISIBILITY stage 1a: bulk-runner (ChatGPT + Gemini + Perplexity + Claude)")
+    bulk_rows = discover_llm_visibility(models=models)
+    rows.extend(bulk_rows)
+
+    log("LLM VISIBILITY stage 1b: Google AI Mode (Gemini-powered, best-effort)")
+    gai_items = _safe_discover(discover_google_ai_mode, "google_ai_mode")
+    rows.extend(_google_ai_mode_to_llm_rows(gai_items))
+
     if not rows:
-        log("no LLM visibility rows — check actor slug and config")
+        log("no LLM visibility rows — check actor slugs and config")
         return
+    log(f"  total rows collected: {len(rows)}")
     log("LLM VISIBILITY stage 2: persist")
     df_all = persist_llm(rows)
     log("LLM VISIBILITY stage 3: metrics")
