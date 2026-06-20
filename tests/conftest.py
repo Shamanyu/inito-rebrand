@@ -21,7 +21,7 @@ def pipe(tmp_path, monkeypatch):
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "DATA", tmp_path)
     # point fetch cache path into tmp dir so tests don't touch real cache
-    monkeypatch.setattr(mod, "FETCH_CACHE_PATH", tmp_path / "fetch_cache.parquet")
+    monkeypatch.setattr(mod, "FETCH_CACHE_PATH", tmp_path / "fetch_cache.csv")
     return mod
 
 

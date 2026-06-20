@@ -24,10 +24,11 @@
   ],
 
   "reddit_searches": ["inito", "inito fertility", "inito android", "inito vs mira"],
-  "social_keywords": ["inito", "inito fertility monitor"],
-  "youtube_searches": ["inito fertility monitor review", "inito insight wireless reader"],
 
-  "_comment_llm_prompts": "Prompts sent to major LLMs to measure brand visibility. Frozen — add new entries, never edit existing (breaks time series). Intent labels: brand_entity, comparison, use_case, purchase, attribute_probe.",
+  "_comment_ads": "Google Ads Transparency Center start URLs (one advertiser per URL). Build them at https://adstransparency.google.com by searching the advertiser/domain, then copy the resulting URL (keep region=US). Inito's own advertiser URL first (catches our own stale ad copy = highest priority), competitors after. Leave empty to skip the ads source.",
+  "ads_start_urls": [],
+
+  "_comment_llm_prompts": "Prompts sent to live-web LLM assistants to measure brand visibility. Frozen — add new entries, never edit existing (breaks time series). Intent labels: brand_entity, comparison, use_case, purchase, attribute_probe.",
   "llm_visibility_prompts": [
     { "prompt": "Inito",                                          "intent": "brand_entity" },
     { "prompt": "Inito reviews",                                  "intent": "brand_entity" },
@@ -52,66 +53,50 @@
     { "prompt": "Is Inito accurate?",                              "intent": "attribute_probe" }
   ],
 
-  "_comment_llm_models": "Models run via fayoussef/bulk-llm-runner. Use the model identifiers the actor accepts. Check actor docs for current supported values.",
-  "_comment_llm_models_rationale": "Consumer-default models: what a typical user actually gets when they open each product. NOTE: API calls use training-data knowledge only — no live web search. ChatGPT/Gemini/Claude on the web do use search; this gap explains why manual searches differ. Perplexity/sonar-pro is the exception: it always searches the live web, so its API results match the consumer product closely.",
-  "llm_models": [
-    "openai/gpt-5",
-    "google/gemini-2.5-pro",
-    "perplexity/sonar-pro",
-    "anthropic/claude-sonnet-4.5"
-  ],
-  "_comment_llm_sampling": "num_runs: how many times to repeat each (model × prompt batch) with a fresh datacenter IP. Each run is an independent sample — we pool across runs to compute Wilson CIs. proxy_group: DATACENTER for speed/cost; switch to RESIDENTIAL if LLMs start returning geo-blocked responses. NOTE: perplexity/sonar-pro always does live web search via API — identical to the Perplexity web UI. Web scrapers for Perplexity are Cloudflare-blocked.",
-  "llm_num_runs": 1,
+  "_comment_llm_surfaces": "Live-web AI assistants, each scraped through its own web-interface actor (see actors below). These behave like a real user (live web search + citations) — no training-data-only API calls.",
+  "llm_surfaces": ["chatgpt", "perplexity"],
+
+  "_comment_llm_sampling": "llm_num_runs: each (prompt x surface) is sampled this many times, each as a SEPARATE actor run so it draws a fresh US proxy session = a distinct US IP. The samples are pooled for Wilson CIs. proxy_country is hard-pinned US; proxy_group is DATACENTER (switch to RESIDENTIAL if a surface bot-blocks datacenter ranges).",
+  "llm_num_runs": 3,
   "llm_proxy_group": "DATACENTER",
   "proxy_country": "US",
 
-  "llm_system_prompt": "You are a helpful assistant answering questions about fertility monitors, ovulation tracking, and reproductive health. Answer accurately and helpfully based on your knowledge.",
-
-  "_comment_claims": "Heuristic regex (case-insensitive). The LLM judge resolves ambiguity and assigns final status. Add patterns as you see new phrasings.",
+  "_comment_claims": "Heuristic regex (case-insensitive) for the OLD (phone-dependent) product. The LLM judge resolves ambiguity and assigns final status. NOTE: the four hormones (E3G/estrogen, LH, PdG, FSH), the companion app, the dip-strip workflow and accuracy claims are common to BOTH products and are NOT stale — do not add patterns for them.",
   "claim_patterns": {
-    "iphone_only": ["only.{0,20}iphone", "iphone.{0,12}only", "only compatible with ios", "iphone 7 and up", "specific iphone models", "compatible with iphone models only"],
-    "attach_to_phone": ["attach.{0,40}(phone|iphone)", "snaps? onto", "clip.{0,30}(phone|iphone)", "attachment clip", "connect.{0,30}monitor.{0,15}phone", "strap.{0,25}(device|monitor).{0,15}phone", "plug.{0,20}into.{0,20}(phone|charging port)"],
+    "iphone_only": ["only.{0,20}iphone", "iphone.{0,12}only", "only compatible with ios", "iphone 7 and up", "specific iphone models", "compatible with iphone models only", "iphone 13 pro max"],
+    "attach_to_phone": ["attach.{0,40}(phone|iphone)", "snaps? onto", "clip.{0,30}(phone|iphone)", "attachment clip", "connect.{0,30}monitor.{0,15}phone", "strap.{0,25}(device|monitor).{0,15}phone", "plug.{0,20}into.{0,20}(phone|charging port)", "lightning port", "charging port"],
     "camera_dependent": ["phone'?s camera", "camera.{0,20}(scan|sensor|read|capture)", "uses your (iphone|phone) camera", "camera and.{0,12}lighting", "lightning port and camera"],
     "no_android": ["not (available|supported|compatible).{0,20}android", "android.{0,20}not (supported|available|compatible)", "inaccessible to android", "no android compatibility", "won'?t work.{0,20}android"]
   },
-  "current_signal_patterns": ["insight wireless reader", "wi-?fi enabled", "compatible with (both )?(ios|iphone) and android", "now (on|available (on|for)) android"],
+  "current_signal_patterns": ["insight wireless reader", "insight reader", "wi-?fi enabled", "compatible with (both )?(ios|iphone) and android", "now (on|available (on|for)) android", "spectral mapping", "standalone reader", "no (phone )?camera needed"],
   "price_pattern": "\\$\\s?\\d{2,4}",
 
   "owned_domains": ["inito.com", "blog.inito.com", "ng.inito.com", "apps.apple.com", "play.google.com"],
-  "_comment_owned": "apps.apple.com / play.google.com / amazon listings are owned only for Inito's own listings. Ownership is refined in code: amazon ASINs are flagged owned_marketplace; app-store pages matched by the Inito app id.",
+  "_comment_owned": "apps.apple.com / play.google.com / amazon listings are owned only for Inito's own listings. Ownership is refined in code: amazon ASINs are flagged owned_marketplace; app-store pages matched by the Inito app id; ads matched by advertiser name.",
   "owned_app_ids": ["id1183799668", "com.inito.insight"],
   "competitor_domains": ["miracare.com", "shop.miracare.com", "proovtest.com", "ovul.ai"],
 
   "actors": {
     "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned.",
     "serp": "apify/google-search-scraper",
-    "bing": "REPLACE_WITH_REAL_SLUG",
-    "_comment_bing": "Search apify.com/store for 'bing search', pick most-starred actor, verify input schema matches discover_bing() run_input keys.",
     "content": "apify/website-content-crawler",
     "reddit": "trudax/reddit-scraper-lite",
-    "instagram": "apify/instagram-scraper",
-    "twitter": "apidojo/tweet-scraper",
-    "youtube": "streamers/youtube-scraper",
-    "tiktok": "clockworks/free-tiktok-scraper",
-    "llm_runner": "fayoussef/bulk-llm-runner",
-    "_comment_llm_runner": "Bulk API caller for ChatGPT (gpt-5) and Claude. Perplexity and Google AI Mode have dedicated web-interface actors below.",
-    "perplexity_web": "zhorex/perplexity-ai-scraper",
-    "_comment_perplexity_web": "Headless browser scraper — uses the real Perplexity.ai web UI, no API key needed. $0.02/query. brand_monitor mode pre-extracts mention/position/competitors. Input: queries (array), mode, brandName, maxQueries, waitTimeout, proxyConfiguration.",
-    "google_ai_mode": "scrape.badger/google-ai-mode-scraper",
-    "_comment_google_ai_mode": "Scrapes Google AI Mode (udm=50) — full-page Gemini-powered generative answer, stronger signal than AI Overview. $0.005/query. Input: queries (newline-separated string), gl, hl. Output: query, text_blocks [{type, snippet}], references [{title, link, snippet}]."
+    "ads": "lexis-solutions/google-ads-scraper",
+    "_comment_ads": "Scrapes the Google Ads Transparency Center by startUrls (advertiser/domain). Input: startUrls [{url}], maxItems, proxyConfiguration. Output per ad: advertiserName, creativeId, format, url, previewUrl, variants[{text,...}]. NOT keyword search.",
+    "chatgpt": "tri_angle/gpt-search",
+    "_comment_chatgpt": "Live ChatGPT web search. Input: prompts (array), country (string, default US). Output: {id, prompt, response, citations:[{title,url,source,snippet}]}. Country pins the proxy; distinct IPs come from separate runs.",
+    "perplexity": "zhorex/perplexity-ai-scraper",
+    "_comment_perplexity": "Live Perplexity web answers. Input: queries (array), mode ('search'|'brand_monitor'), brandName, maxQueries, waitTimeout, proxyConfiguration. brand_monitor pre-extracts mention/position/competitors."
   },
 
   "limits": {
     "serp_results_per_query": 100,
     "serp_pages_per_query": 1,
-    "bing_results_per_query": 10,
     "news_max_per_query": 20,
     "reddit_max_items": 120,
-    "social_max_items": 80,
-    "youtube_max_items": 40,
-    "tiktok_max_items": 50,
+    "ads_max_items": 100,
     "perplexity_wait_timeout": 60,
-    "judge_model": "claude-haiku-4-5-20251001",
-    "_comment_model": "Cheapest model, right for high-volume classification. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
+    "judge_model": "claude-sonnet-4-6",
+    "_comment_model": "Sonnet for classification accuracy (above Haiku). claude-opus-4-8 for maximum accuracy. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
   }
 }

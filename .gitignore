@@ -1,5 +1,6 @@
 .env
-data/*.parquet
-data/*.csv
+# ignore everything under data/ (snapshots, history, per-run folders) except the placeholder
+data/*
+!data/.gitkeep
 __pycache__/
 *.pyc
