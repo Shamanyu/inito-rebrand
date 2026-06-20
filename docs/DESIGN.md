@@ -8,15 +8,18 @@ we are building toward; where it differs from the current code, that is called o
 > 1. **CSV-only persistence** — all parquet writes (snapshots, history, fetch cache) become CSV.
 > 2. **Track A surfaces** = Google SERP (+ AI Overview, + ChatGPT/Perplexity panels), Google News,
 >    **Google Ads (new)**, Reddit. **Removed:** Bing, Instagram, X, YouTube, TikTok.
-> 3. **Track B surfaces** = **ChatGPT** (`tri_angle/gpt-search`) + **Perplexity**
->    (`zhorex/perplexity-ai-scraper`), both live-web with citations. **Removed:** the API bulk LLM
->    runner and all training-data-only sources. **Gemini / Google AI Mode dropped for now.**
+> 3. **Track B surfaces** = **ChatGPT** (`tri_angle/gpt-search` Apify actor) + **Perplexity**
+>    (**sonar API, direct** — `perplexity_complete()`), both live-web with citations. **Removed:** the API
+>    bulk LLM runner, all training-data-only sources, and the anti-bot-walled `zhorex` scraper.
+>    **Gemini / Google AI Mode dropped for now.**
 > 4. **Judge model** upgraded Haiku → **Sonnet** (`claude-sonnet-4-6`), Opus selectable.
 > 5. **Parallel + fail-fast everywhere**; failures become **error rows/notes in the sheet**, no slow retries.
+>    Empty responses flagged `status=empty`, never judged.
 > 6. **Action engine reworked** — source-targeted, ownership-aware, prioritized, with cross-track linkage.
-> 7. **3× sampling from distinct US IPs** — every (prompt × surface) is queried 3 times, each via a
->    distinct Apify proxy session pinned to the US (FR-B2/FR-B2a).
-> 8. **Per-run timestamped output folder** — each run writes all its CSVs into `data/run_<timestamp>/`;
+> 7. **3× sampling** per (prompt × surface), pooled for CIs. ChatGPT pins US via the actor `country`;
+>    Perplexity (API) has no IP control — "distinct US IPs" is aspirational, not enforced.
+> 8. **Per-prompt resume** keyed `(surface, run_index, prompt)` — a partial run no longer skips the rest.
+> 9. **Per-run timestamped output folder** — each run writes all its CSVs into `data/run_<timestamp>/`;
 >    cumulative history/series stay at the `data/` root (NFR11).
 
 ---
@@ -59,11 +62,11 @@ is a CLI invocation; the same code runs locally or as a scheduled Apify Actor.
                 │   google-search-scraper   │   │  (classify_page /    │
                 │   website-content-crawler │   │   analyze_llm_resp.) │
                 │   google-ads-scraper      │   └─────────────────────┘
-                │   reddit-scraper-lite     │
-                │  Track B:                 │
-                │   tri_angle/gpt-search    │
-                │   zhorex/perplexity-...   │
-                └──────────────┬───────────┘
+                │   reddit-scraper-lite     │   ┌─────────────────────┐
+                │  Track B:                 │   │  Perplexity sonar    │
+                │   tri_angle/gpt-search    │   │  API (Track B,       │
+                └──────────────┬───────────┘   │  direct, not Apify)  │
+                               │                └─────────────────────┘
                                │
                        ┌────────────────────────┐   ┌──────────────────┐
                        │  data/ (CSV only)       │ ─►│  Google Sheets    │
@@ -90,7 +93,7 @@ is a CLI invocation; the same code runs locally or as a scheduled Apify Actor.
 | **Classify (shared)** | `detect_claims`, `judge`, `ownership`, `judge_llm_response` | Regex + Sonnet judges + ownership routing. |
 | **Persist (A)** | `persist` | Dated CSV snapshot + CSV history + latest CSV + review queue. |
 | **Metrics (A)** | `compute_metrics`, `_sov`, `_kappa_regex_vs_judge`, `_run_quality_score`, `print_diff` | Time series + quality + diff. |
-| **Discover (B)** | `discover_chatgpt` (`tri_angle/gpt-search`), `discover_perplexity` (`zhorex`), + per-actor → row adapters | Query live assistants in parallel; capture answer + citations. **Removed:** `discover_llm_visibility` (bulk runner). |
+| **Discover (B)** | `_run_chatgpt` (`tri_angle/gpt-search` actor), `_run_perplexity` (`perplexity_complete()` sonar API), via `SURFACE_RUNNERS` | Query live assistants in parallel; capture answer + citations. **Removed:** `discover_llm_visibility` (bulk runner). |
 | **Persist/Export (B)** | `persist_llm`, `export_llm_csv`, `export_serp_csv`, `derive_action`, `_sources_to_plain` | CSV outputs + action derivation. |
 | **Metrics (B)** | `compute_llm_metrics`, `_wilson_ci`, `_mean_ci` | Wilson/mean CIs per prompt/surface/overall. |
 | **Cross-track** | `link_stale_sources` *(new)* | Join Track B cited stale URLs to Track A observations (FR-ACT7). |
@@ -145,12 +148,12 @@ Records keyed by `normalize_url`; on collision, the record with the **lowest non
 
 ```
 run_llm_visibility()
-   └─ parallel over surfaces × prompts × runs:
-        ├─ discover_chatgpt   → tri_angle/gpt-search   (live ChatGPT search + citations)
-        └─ discover_perplexity→ zhorex/perplexity...   (live Perplexity + citations, brand_monitor)
-        │     each result → judge_llm_response() + merge actor citations + inline URLs
-        │     resume: skip (surface, run_index) already in today's CSV history
-        │     on actor failure: FAIL FAST → one error row per prompt (error_note set)
+   └─ parallel over (surface, run) jobs, each running only today's not-yet-done prompts:
+        ├─ _run_chatgpt    → tri_angle/gpt-search actor   (live ChatGPT search + citations)
+        └─ _run_perplexity → perplexity_complete() sonar  (live Perplexity + citations, API)
+        │     each result → _llm_row(): empty? → status=empty; else judge + merge citations + action
+        │     resume: skip (surface, run_index, prompt) already in today's CSV history
+        │     on failure: FAIL FAST → one error row per affected prompt (error_note set)
    └─ persist_llm(rows) → llm_visibility_<date>.csv + llm_visibility_history.csv
         └─ export_llm_csv() → llm_visibility_latest.csv (action, clickable sources, error notes)
    └─ link_stale_sources(rows) → cross-reference cited stale URLs with Track A observations
@@ -167,46 +170,36 @@ error_note` (`error_note` populated on failure rows).
 
 > Naming change: the prior `model` column becomes **`surface`** (ChatGPT/Perplexity are products/UIs, not API model ids).
 
-### 5.2 Per-surface adapters
+### 5.2 Per-surface runners (`SURFACE_RUNNERS`)
 
-Each actor has a different input/output schema, so each surface has a thin adapter that:
-1. Builds the actor `run_input` (prompts, **proxyConfiguration** per § 5.4, brand name / wait timeout as the actor requires).
-2. Calls `run_actor` (fail-fast).
-3. Maps each item to the common row schema, extracting **answer text + citations** (actor-provided +
-   inline-regex URLs, deduped). For `zhorex` brand_monitor, fold in its pre-extracted
-   mention/position/competitor signals as judge priors.
+A surface is **either** an Apify actor **or** a direct API — both register the same way:
+- **ChatGPT** (`_run_chatgpt`): builds `run_input` (`prompts` + `country=US`), calls `run_actor` (fail-fast),
+  maps each item to the row schema with answer text + citations.
+- **Perplexity** (`_run_perplexity`): calls **`perplexity_complete()`** (the sonar API) per prompt,
+  per-prompt fail-fast (one bad prompt → one error row). No Apify, no proxy object.
+- Both feed `_llm_row()`, which judges the response (skipping empty text → `status=empty`) and attaches
+  `action` + `priority`.
 
 ### 5.3 Parallelism & resume
 
-- Jobs = `surfaces × num_runs` where **`num_runs = 3`**, run via a thread pool (cap ~10 concurrent).
-- **Resume key** = `(surface, run_index)` present in `llm_visibility_history.csv` for `RUN_DATE` with real
-  data (non-null `inito_mentioned`), so a crashed run re-runs only missing combos.
+- Jobs = per `(surface, run_index)`; each job runs only the **prompts not yet done today**. Thread pool, cap ~10.
+- **Resume key** = `(surface, run_index, prompt)` with real data (non-null `inito_mentioned`) in
+  `llm_visibility_history.csv` for `RUN_DATE`. Per-prompt granularity so a 1-prompt run doesn't mark the
+  whole `(surface, run)` done and skip the rest.
 
-### 5.4 Distinct-IP sampling (FR-B2/FR-B2a)
+### 5.4 Sampling & IP pinning (FR-B2/FR-B2a)
 
-Goal: the 3 samples per (prompt × surface) come from **3 different US IPs**, so we sample real
-geographic/IP variance in the live answer, not the same cached egress three times.
+The 3 samples per (prompt × surface) are independent draws, pooled for CIs — they capture **model variance**.
 
-```python
-def _proxy_for(run_index: int) -> dict:
-    return {
-        "useApifyProxy": True,
-        "apifyProxyGroups": [CFG.get("llm_proxy_group", "DATACENTER")],  # RESIDENTIAL fallback if blocked
-        "apifyProxyCountry": "US",                                       # hard-pinned US
-        # A *fixed* session id pins one IP for this run; a *different* session per run_index
-        # forces a different egress IP across the 3 samples of the same (prompt, surface).
-        "apifyProxySession": f"inito_{surface_key}_{run_index}_{RUN_TS}",
-    }
-```
+- **ChatGPT**: the actor takes a `country` string (`"US"`), so answers are US-localized; it has no
+  proxy-object/session field, so per-sample IP control isn't possible — distinct IPs across the 3 runs are
+  whatever the actor's pool yields.
+- **Perplexity (sonar API)**: server-side live search; no client IP control at all.
 
-- Each `run_index` (1,2,3) → unique `apifyProxySession` → distinct sticky IP.
-- `RUN_TS` in the session string prevents reusing yesterday's pinned IP.
-- Country is enforced on **every** Track B actor call. If a surface bot-blocks datacenter ranges,
-  flip `llm_proxy_group` to `RESIDENTIAL` (still US) in config — no code change.
-- **Caveat (design note):** Apify guarantees the *session→IP* mapping, not that three sessions land on
-  three *unique* IPs from a small pool. With the US datacenter pool this is effectively always distinct;
-  if a surface needs residential and the pool is thin, distinctness is best-effort. We log the resolved
-  session per row so non-distinct IPs are auditable.
+The original "3 distinct US IPs" goal is therefore **aspirational, not enforced**. (First-run reality: the
+Apify account had no DATACENTER proxy group, and an actor's `proxyConfiguration` object can't set a per-run
+session anyway.) If a hard per-surface IP guarantee is ever required, it needs an actor that exposes a
+session field or an external proxy layer — tracked in `docs/OPEN-ITEMS.md`.
 
 ## 6. Classification Subsystem (shared core)
 
@@ -335,17 +328,17 @@ Sections: `market`; `queries` (frozen+intent, append-only); `reddit_searches`; `
 `current_signal_patterns` + `price_pattern`; `owned_domains`/`owned_app_ids`/`competitor_domains`;
 `actors` (slugs); `limits` (caps + `judge_model`).
 
-**Confirmed `actors` set (target):**
+**Confirmed `actors` set:**
 ```
-serp     : apify/google-search-scraper
-content  : apify/website-content-crawler
-ads      : lexis-solutions/google-ads-scraper
-reddit   : trudax/reddit-scraper-lite
-chatgpt  : tri_angle/gpt-search
-perplexity: zhorex/perplexity-ai-scraper
+serp    : apify/google-search-scraper
+content : apify/website-content-crawler
+ads     : lexis-solutions/google-ads-scraper
+chatgpt : tri_angle/gpt-search
+reddit  : trudax/reddit-scraper-lite
 ```
+Plus non-actor surfaces: **Perplexity = sonar API** (`limits.perplexity_model`, `PERPLEXITY_API_KEY`).
 **Deleted from config:** `bing`, `instagram`, `twitter`, `youtube`, `tiktok`, `llm_runner`,
-`google_ai_mode`, `perplexity_web` (folded into `perplexity`).
+`google_ai_mode`, the `perplexity` actor slug, `llm_proxy_group`, `perplexity_wait_timeout`.
 
 **Invariants:** queries/prompts append-only; judge model id only in `limits.judge_model`
 (`claude-sonnet-4-6`); add regex to improve recall, never make regex the final arbiter.
@@ -379,18 +372,18 @@ combination must dispatch both tracks (the old `elif` shadowing is removed in th
   writes for `Actor.push_data()` / KV store if needed; add a Slack webhook in `print_diff` to post the
   weekly delta. On-demand and scheduled share one codebase.
 
-## 15. Known Limitations & Tech Debt (target build watch-list)
+## 15. Known Limitations & Tech Debt
 
-1. **Web-interface scraper fragility** is the top risk for Track B — anti-bot/login/rate-limits on
-   `tri_angle/gpt-search` and `zhorex/perplexity-ai-scraper`. Mitigated by fail-fast + error notes + two surfaces.
-2. **CSV typing** — values reload as strings; readers must coerce. Large page-text cells stress CSV quoting.
-3. **Ads ownership** — landing-page domain heuristic; verify in edge cases (redirects, trackers).
-4. **Cross-track linkage** depends on URL-normalization parity between the two tracks.
-6. **Distinct-IP best-effort** — session→IP is guaranteed by Apify, but 3 sessions landing on 3 *unique*
-   IPs depends on pool size (reliable on US datacenter; best-effort on thin residential pools). Resolved
-   session is logged per row for audit.
-7. **Run-folder vs cumulative split** — pending your confirmation (§7.1); fully-self-contained folders are a one-line change.
-5. Single-file module — fine now; a package split (discover/classify/persist/metrics) is the natural next refactor.
+The live, prioritized list lives in `docs/OPEN-ITEMS.md`. Design-level notes:
+
+1. **ChatGPT actor fragility** — anti-bot / one-time approval / latency. Perplexity (sonar API) is reliable
+   but needs a key. Mitigated by fail-fast + error notes.
+2. **No enforced IP control** for Track B (see §5.4) — samples capture model variance, not IP variance.
+3. **CSV typing** — values reload as strings; readers coerce via `_coerce_*`/`_to_bool`. Large page-text cells stress quoting.
+4. **Ads ownership** — advertiser/landing-domain heuristic; verify in edge cases.
+5. **Cross-track linkage** depends on URL-normalization parity and Track A history existing first.
+6. **AI-Overview rows excluded from headline metrics** (`ai_overview` not in `_WEB_PLATFORMS`).
+7. Single-file module — fine now; a package split is the natural next refactor.
 
 ## 16. Component Responsibility Summary
 

@@ -73,6 +73,13 @@ class _Msgs:
 class _FakeClaude: messages = _Msgs()
 pipe.claude = _FakeClaude()
 
+# ---- fake Perplexity sonar API (direct, not an actor) ----
+pipe.PPLX_KEY = "pplx-test"
+pipe.perplexity_complete = lambda prompt, model: (
+    "Inito clips to your iPhone and uses the phone camera. Mira is preferred." if "mira" in prompt.lower()
+    else "Inito InSight Wireless Reader works on iOS and Android.",
+    ["https://oldblog.com/inito"] if "mira" in prompt.lower() else ["https://inito.com/"])
+
 # ---- fake Apify actors: edit datasets per your change ----
 STALE = "Inito only works with iPhone. You attach the monitor to your phone and it uses your iPhone's camera. Not available on Android."
 CURRENT = "The Inito InSight Wireless Reader is Wi-Fi enabled and works on both iOS and Android."
@@ -103,17 +110,16 @@ def fake_run_actor(actor_id, run_input, label, retries=1):
         return [{"url": pipe.normalize_url(su["url"]),
                  "text": TEXT_BY_URL.get(pipe.normalize_url(su["url"]), CURRENT)}
                 for su in run_input.get("startUrls", [])]
-    if label.startswith("chatgpt"):
-        return [{"prompt": "Inito", "response": "Inito (InSight Wireless Reader) is great. Worth it? Yes.",
-                 "citations": [{"url": "https://inito.com/"}]},
-                {"prompt": "Inito vs Mira", "response": "Inito only works on iPhone and uses the phone camera; Mira is preferred.",
-                 "citations": [{"url": "https://leafsnap.com/inito-review"}]}]
-    if label.startswith("perplexity"):
-        return [{"query": "Inito", "answer": CURRENT, "sources": [{"url": "https://inito.com/"}],
-                 "mentioned": True, "position": 1, "competitorsMentioned": []},
-                {"query": "Inito vs Mira", "answer": "Inito clips to your phone (iPhone only). Mira is preferred.",
-                 "sources": [{"url": "https://oldblog.com/inito"}], "mentioned": True, "position": 2,
-                 "competitorsMentioned": ["Mira"]}]
+    if label.startswith("chatgpt"):  # echoes the prompts actually requested (respects per-prompt resume)
+        out = []
+        for p in run_input.get("prompts", []):
+            stale = "mira" in p.lower()
+            out.append({"prompt": p,
+                        "response": "Inito only works on iPhone and uses the phone camera; Mira is preferred." if stale
+                        else "Inito (InSight Wireless Reader) is great. Worth it? Yes.",
+                        "citations": [{"url": "https://leafsnap.com/inito-review" if stale else "https://inito.com/"}]})
+        return out
+    # NOTE: Perplexity is NOT an actor — it's stubbed above via pipe.perplexity_complete / pipe.PPLX_KEY.
     return []
 pipe.run_actor = fake_run_actor
 

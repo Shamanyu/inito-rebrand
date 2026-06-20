@@ -248,6 +248,38 @@ def test_discover_llm_visibility_runs_surface(pipe, monkeypatch):
     assert "inito_mentioned" in rows[0]
     assert "action" in rows[0] and "priority" in rows[0]
 
+def test_llm_row_empty_response_is_not_judged(pipe):
+    # regression: an empty actor response must NOT be sent to the judge (it fabricates signals).
+    row = pipe._llm_row(1, "perplexity", "Inito vs Mira", "comparison", "   ")
+    assert row["status"] == "empty"
+    assert row["inito_mentioned"] is None and row["confidence"] is None
+    assert "Empty response" in row["action"] and row["priority"] == 6
+
+def test_run_perplexity_uses_sonar_api(pipe, monkeypatch):
+    monkeypatch.setattr(pipe, "PPLX_KEY", "pplx-test")
+    monkeypatch.setattr(pipe, "perplexity_complete",
+                        lambda prompt, model: ("Inito is a fertility monitor.", ["https://inito.com/"]))
+    rows = pipe._run_perplexity(1, [{"prompt": "Inito", "intent": "brand_entity"}])
+    assert len(rows) == 1 and rows[0]["surface"] == "perplexity" and rows[0]["status"] == "ok"
+    assert "inito_mentioned" in rows[0] and "https://inito.com/" in rows[0]["sources_cited"]
+
+def test_run_perplexity_errors_without_key(pipe, monkeypatch):
+    monkeypatch.setattr(pipe, "PPLX_KEY", "")
+    rows = pipe._run_perplexity(1, [{"prompt": "Inito", "intent": "brand_entity"}])
+    assert rows[0]["status"] == "error" and "PERPLEXITY_API_KEY" in rows[0]["error_note"]
+
+def test_run_perplexity_per_prompt_failfast(pipe, monkeypatch):
+    monkeypatch.setattr(pipe, "PPLX_KEY", "pplx-test")
+    def flaky(prompt, model):
+        if prompt == "boom":
+            raise RuntimeError("api 500")
+        return ("ok answer", [])
+    monkeypatch.setattr(pipe, "perplexity_complete", flaky)
+    rows = pipe._run_perplexity(1, [{"prompt": "Inito", "intent": "brand_entity"},
+                                    {"prompt": "boom", "intent": "brand_entity"}])
+    by = {r["prompt"]: r["status"] for r in rows}
+    assert by["Inito"] == "ok" and by["boom"] == "error"  # one bad prompt doesn't kill the batch
+
 def test_discover_llm_visibility_error_rows_on_failure(pipe, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("actor exploded")
@@ -266,7 +298,24 @@ def test_resume_skips_completed_combos(pipe, monkeypatch):
         pipe.DATA / "llm_visibility_history.csv", index=False)
     monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
     rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"}], 1)
-    assert rows == []  # only combo was already done -> nothing to run
+    assert rows == []  # the only prompt was already done -> nothing to run
+
+def test_resume_is_per_prompt_not_per_run(pipe, monkeypatch):
+    # regression (C6): one done prompt must NOT skip the other prompts of the same (surface, run).
+    import pandas as pd
+    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt",
+                   "prompt": "Inito", "inito_mentioned": True}]).to_csv(
+        pipe.DATA / "llm_visibility_history.csv", index=False)
+    seen = {}
+    def fake_actor(actor_id, run_input, label, retries=1):
+        seen["prompts"] = list(run_input.get("prompts", []))
+        return [{"prompt": p, "response": "Inito is great.", "citations": []} for p in run_input["prompts"]]
+    monkeypatch.setattr(pipe, "run_actor", fake_actor)
+    rows = pipe.discover_llm_visibility(
+        ["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"},
+                      {"prompt": "Inito reviews", "intent": "brand_entity"}], 1)
+    assert seen["prompts"] == ["Inito reviews"]            # only the undone prompt was sent
+    assert [r["prompt"] for r in rows] == ["Inito reviews"]
 
 def test_persist_llm_writes_files(pipe):
     rows = [{"run_date": "2026-06-19", "run_index": 1, "surface": "chatgpt", "prompt": "Inito",

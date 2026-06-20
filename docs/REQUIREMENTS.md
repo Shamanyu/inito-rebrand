@@ -10,14 +10,15 @@
 > reworked the recommended-actions model; mandated **CSV-only** outputs and **parallel, fail-fast**
 > execution with error notes written to the sheet.
 >
-> **Surface decisions (confirmed):** Track B = **ChatGPT** (`tri_angle/gpt-search`) + **Perplexity**
-> (`zhorex/perplexity-ai-scraper`). **Gemini is dropped for now** (incl. the dedicated Google AI Mode
-> actor). **Google Ads** is added as a Track A surface (`lexis-solutions/google-ads-scraper`). Google AI
-> Overview remains a free passive capture inside the Track A Google SERP scrape.
+> **Surface decisions (confirmed, post-first-run):** Track B = **ChatGPT** (`tri_angle/gpt-search` Apify
+> actor) + **Perplexity** (**sonar API, direct** — web scrapers are anti-bot-walled, so we call the API
+> the product runs on). **Gemini dropped for now.** **Google Ads** added to Track A
+> (`lexis-solutions/google-ads-scraper`). Google AI Overview is a free passive capture in the SERP scrape.
 >
-> **Sampling & output (confirmed):** every (prompt × surface) is sampled **3× from distinct US IPs**
-> (`num_runs = 3` with per-run proxy sessions, `apifyProxyCountry = "US"`); every run writes all its CSVs
-> into a **timestamped output folder**. See FR-B2/FR-B2a and NFR11.
+> **Sampling & output (confirmed):** every (prompt × surface) is sampled **3×** (`num_runs = 3`), pooled
+> for Wilson CIs. The samples capture model variance; only ChatGPT pins US (actor `country`), Perplexity
+> (API) has no IP control — the original "3 distinct US IPs" goal is aspirational, not enforced. Every run
+> writes all its CSVs into a **timestamped output folder**. See FR-B2/FR-B2a and NFR11.
 
 ---
 
@@ -166,23 +167,24 @@ assistant on the web. Therefore:
 - **Required:** each LLM surface is queried through a **web-interface scraper actor** that drives the live
   product UI (or its live-search API equivalent) so answers reflect **current web content and real citations**.
 
-**Target surfaces (confirmed — each via its own web-interface actor):**
+**Target surfaces (confirmed, post-first-run):**
 
-| Surface | Actor | What it represents |
+| Surface | Mechanism | What it represents |
 |---|---|---|
-| ChatGPT (web search) | `tri_angle/gpt-search` | The live ChatGPT search experience an average user gets, with citations. |
-| Perplexity (web) | `zhorex/perplexity-ai-scraper` | Perplexity's always-live web answer with citations; `brand_monitor` mode pre-extracts mention/position/competitors. |
-| Google AI Overview | *(via Track A `apify/google-search-scraper`)* | Google's generative answer, captured passively in the SERP scrape (no dedicated actor). |
+| ChatGPT (web search) | `tri_angle/gpt-search` Apify actor | Live ChatGPT search with citations. Needs one-time actor approval. |
+| Perplexity | **sonar API, direct** (`perplexity_complete()`) | Perplexity's always-live web answer + citations. Web scrapers (zhorex) are anti-bot-walled; sonar is the reliable equivalent. Needs `PERPLEXITY_API_KEY`. |
+| Google AI Overview | *(via Track A SERP scrape)* | Google's generative answer, captured passively (no dedicated actor). |
 
-**Dropped for now:** Google Gemini (`gemini.google.com`) and the dedicated Google AI Mode actor.
+**Dropped for now:** Google Gemini and the dedicated Google AI Mode actor. A surface is "live web" whether
+via an actor or an always-live-search API (sonar) — the rule is no training-data-only calls.
 
 | ID | Requirement |
 |---|---|
-| FR-B1 | Send every prompt in `llm_visibility_prompts` to every configured **web-interface LLM surface**. |
-| FR-B2 | For **every (prompt × surface) combination, issue exactly 3 samples** (`num_runs = 3`), each from a **distinct US-based IP**. Run all (surface × prompt × run) jobs **in parallel**. The 3 samples are pooled to compute Wilson/mean CIs (FR-B9). |
-| FR-B2a | **Distinct-IP requirement (proxy config):** each `run_index` (1,2,3) must use a unique Apify proxy **session id** so its egress IP differs from the other two, with `apifyProxyCountry = "US"` enforced on every actor call. A fixed session pins a single IP for the duration of a run; varying the session per `run_index` rotates the IP. Default group is `DATACENTER`; fall back to `RESIDENTIAL` (still US) if a surface geo-blocks or bot-blocks datacenter IPs. This applies to **both** Track B surface actors (`tri_angle/gpt-search`, `zhorex/perplexity-ai-scraper`); their `run_input.proxyConfiguration` must be built accordingly. |
-| FR-B3 | Resume: skip (surface, run_index) combos already completed for today (read from CSV history). |
-| FR-B4 | On actor failure, **fail fast** (no slow retries) and emit one **error row per prompt with an error note** so failures are visible in the sheet. |
+| FR-B1 | Send every prompt in `llm_visibility_prompts` to every configured surface (`config.llm_surfaces`). |
+| FR-B2 | For **every (prompt × surface), issue 3 samples** (`num_runs = 3`), run in parallel; pool for Wilson/mean CIs (FR-B9). |
+| FR-B2a | **US pinning / IP variance:** ChatGPT pins US via the actor's `country` field; Perplexity (sonar API) has no IP control. The original "3 distinct US IPs" goal is **aspirational, not enforced** (an actor's `proxyConfiguration` object can't set a per-run session, and the account had no DATACENTER proxy). The 3 samples primarily capture **model variance**. Revisit if a per-surface IP guarantee becomes a hard requirement. |
+| FR-B3 | Resume: skip **(surface, run_index, prompt)** combos already completed today (per-prompt, so a partial run doesn't block the rest). |
+| FR-B4 | On failure, **fail fast** (no slow retries) and emit one **error row per affected prompt** with a note. Empty responses are flagged `status=empty` and never judged. |
 | FR-B5 | Each answer must capture the verbatim response text **and its cited sources** (the actor's extracted citations + inline URLs). Live citations are mandatory — they are how we trace a stale claim to a fixable page. |
 | FR-B6 | Judge each response (LLM judge): `inito_mentioned`, `inito_rank`, `inito_recommended`, `stale_product_described`, `stale_excerpt` (verbatim), `sources_cited`, `sentiment_inito`, `competitors_named`, `competitor_preferred`, `confidence`. |
 | FR-B7 | Derive a prioritized **action** per row (see § 5.4). |
@@ -300,7 +302,7 @@ data/
 
 ## 9. Assumptions & Constraints
 
-- **A1** — Apify actor slugs/input schemas drift; confirm each before first run. Confirmed slug set: `apify/google-search-scraper`, `apify/website-content-crawler`, `trudax/reddit-scraper-lite`, `lexis-solutions/google-ads-scraper`, `tri_angle/gpt-search`, `zhorex/perplexity-ai-scraper`.
+- **A1** — Apify actor slugs/input schemas drift. Validated live (2026-06-20): `apify/google-search-scraper` (✓ incl. AI Overviews), `apify/website-content-crawler` (✓), `trudax/reddit-scraper-lite` (✓ w/ intermittent 429s), `tri_angle/gpt-search` (✓ after one-time approval). `lexis-solutions/google-ads-scraper` needs Transparency-Center URLs (untested). Perplexity is the **sonar API**, not an actor.
 - **A2** — Track B uses **live-web** assistants; results reflect current web content + citations. (No training-data-only sources remain.)
 - **A3** — Web-interface scrapers are slower per query (~15–30s, browser rendering) and answers vary between runs — hence `num_runs` sampling + CIs.
 - **A4** — Some web-interface scrapers may rate-limit or get bot-blocked at volume; proxy choice (datacenter vs residential) is per-actor and must be verified.

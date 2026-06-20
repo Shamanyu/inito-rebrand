@@ -56,9 +56,8 @@
   "_comment_llm_surfaces": "Live-web AI assistants, each scraped through its own web-interface actor (see actors below). These behave like a real user (live web search + citations) — no training-data-only API calls.",
   "llm_surfaces": ["chatgpt", "perplexity"],
 
-  "_comment_llm_sampling": "llm_num_runs: each (prompt x surface) is sampled this many times, each as a SEPARATE actor run so it draws a fresh US proxy session = a distinct US IP. The samples are pooled for Wilson CIs. proxy_country is hard-pinned US; proxy_group is DATACENTER (switch to RESIDENTIAL if a surface bot-blocks datacenter ranges).",
+  "_comment_llm_sampling": "llm_num_runs: each (prompt x surface) is sampled this many times; samples are pooled for Wilson CIs. ChatGPT (Apify actor) draws a fresh US session per run (proxy_country pins US); Perplexity (sonar API) has no IP control, so its runs capture model variance, not IP variance.",
   "llm_num_runs": 3,
-  "llm_proxy_group": "DATACENTER",
   "proxy_country": "US",
 
   "_comment_claims": "Heuristic regex (case-insensitive) for the OLD (phone-dependent) product. The LLM judge resolves ambiguity and assigns final status. NOTE: the four hormones (E3G/estrogen, LH, PdG, FSH), the companion app, the dip-strip workflow and accuracy claims are common to BOTH products and are NOT stale — do not add patterns for them.",
@@ -85,17 +84,17 @@
     "_comment_ads": "Scrapes the Google Ads Transparency Center by startUrls (advertiser/domain). Input: startUrls [{url}], maxItems, proxyConfiguration. Output per ad: advertiserName, creativeId, format, url, previewUrl, variants[{text,...}]. NOT keyword search.",
     "chatgpt": "tri_angle/gpt-search",
     "_comment_chatgpt": "Live ChatGPT web search. Input: prompts (array), country (string, default US). Output: {id, prompt, response, citations:[{title,url,source,snippet}]}. Country pins the proxy; distinct IPs come from separate runs.",
-    "perplexity": "zhorex/perplexity-ai-scraper",
-    "_comment_perplexity": "Live Perplexity web answers. Input: queries (array), mode ('search'|'brand_monitor'), brandName, maxQueries, waitTimeout, proxyConfiguration. brand_monitor pre-extracts mention/position/competitors."
+    "_comment_perplexity": "Perplexity is NOT an Apify actor — it's a direct sonar API call (perplexity_complete in pipeline.py) needing PERPLEXITY_API_KEY. Web-interface scrapers (zhorex etc.) are anti-bot-walled; sonar is the reliable live-search equivalent."
   },
 
   "limits": {
-    "serp_results_per_query": 100,
+    "serp_results_per_query": 20,
     "serp_pages_per_query": 1,
     "news_max_per_query": 20,
     "reddit_max_items": 120,
     "ads_max_items": 100,
-    "perplexity_wait_timeout": 60,
+    "perplexity_model": "sonar",
+    "_comment_perplexity_model": "Perplexity sonar API model: 'sonar' (cheap, live search) or 'sonar-pro' (deeper). Used by perplexity_complete().",
     "judge_model": "claude-sonnet-4-6",
     "_comment_model": "Sonnet for classification accuracy (above Haiku). claude-opus-4-8 for maximum accuracy. Current model IDs: https://docs.claude.com/en/docs/about-claude/models"
   }

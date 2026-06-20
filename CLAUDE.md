@@ -36,10 +36,10 @@ self-contained, timestamped folder under `data/`.
 
 Runs via `run_llm_visibility()`, invoked by `--llm`.
 
-1. **discover_llm_visibility** — sends each selected prompt to each selected **surface** (ChatGPT via
-   `tri_angle/gpt-search`, Perplexity via `zhorex/perplexity-ai-scraper`). **3 samples per
-   (prompt × surface)** by default, each a separate actor run so it draws a fresh US IP. Parallel
-   (ThreadPoolExecutor). Resume skips (surface, run_index) combos already written today.
+1. **discover_llm_visibility** — sends each selected prompt to each selected **surface** (ChatGPT via the
+   `tri_angle/gpt-search` Apify actor; Perplexity via the **sonar API directly**, `perplexity_complete()`).
+   **3 samples per (prompt × surface)** by default, pooled for CIs. Parallel (ThreadPoolExecutor).
+   Resume skips **(surface, run_index, prompt)** combos already written today (per-prompt, not per-run).
 2. **judge_llm_response** — Claude Sonnet classifies each response: mentioned, rank, recommended,
    stale_product_described, stale_excerpt, sources_cited, sentiment, competitors, confidence.
 3. **derive_action** + **link_stale_sources** — a prioritized, source-targeted action per row;
@@ -58,8 +58,8 @@ Apify owns discovery/enrichment; our code owns classify → persist → metrics.
 | `apify/website-content-crawler` | Full page text for enrichment | Stable |
 | `trudax/reddit-scraper-lite` | Reddit posts/comments | Residential/US proxy |
 | `lexis-solutions/google-ads-scraper` | Google Ads Transparency Center (by advertiser URL) | Driven by `config.ads_start_urls`; **not** keyword search |
-| `tri_angle/gpt-search` | Live ChatGPT web search (Track B) | Input `prompts` + `country`; output `{prompt, response, citations}` |
-| `zhorex/perplexity-ai-scraper` | Live Perplexity web answers (Track B) | `brand_monitor` mode; takes `proxyConfiguration` |
+| `tri_angle/gpt-search` | Live ChatGPT web search (Track B) | Input `prompts` + `country`; output `{prompt, response, citations}`. Needs one-time actor approval. |
+| **Perplexity sonar API** (not an actor) | Live Perplexity answers (Track B) | `perplexity_complete()` → `api.perplexity.ai`; needs `PERPLEXITY_API_KEY`. Web scrapers (zhorex) are anti-bot-walled. |
 
 **Removed (do not re-add without a new requirement):** Bing, Instagram, X/Twitter, YouTube, TikTok,
 `fayoussef/bulk-llm-runner` (API/training-data), `scrape.badger/google-ai-mode-scraper`, the Gemini
@@ -84,7 +84,7 @@ README.md       setup + run + cost + scheduling
 
 ```bash
 pip install -r requirements.txt
-export $(grep -v '^#' .env | xargs)        # APIFY_TOKEN, ANTHROPIC_API_KEY
+export $(grep -v '^#' .env | xargs)        # APIFY_TOKEN, ANTHROPIC_API_KEY (+ optional PERPLEXITY_API_KEY)
 python pipeline.py --refresh               # Track A; interactive source/query multiple-choice
 python pipeline.py --llm                    # Track B; interactive surface/prompt multiple-choice
 python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1 -y   # scripted, no prompts
@@ -140,15 +140,19 @@ Workflow skills encode the conventions below so feature work stays safe and fast
 - **Ads = Transparency Center, not keywords.** `lexis-solutions/google-ads-scraper` takes
   `startUrls` (one advertiser/domain URL each). Populate `config.ads_start_urls` from
   https://adstransparency.google.com (keep `region=US`). Empty list → ads source skipped.
-- **Distinct US IPs (Track B)** come from issuing each of the 3 samples as a *separate* actor run;
-  `country`/`proxyConfiguration` pins US. Apify can't guarantee 3 *unique* IPs from a thin pool — it's
-  best-effort, reliable on US datacenter.
+- **Track B sampling:** the 3 samples per (prompt × surface) capture model variance. ChatGPT pins US via
+  the actor's `country` field; Perplexity (sonar API) has no IP control. The earlier "3 distinct US IPs"
+  goal is aspirational, not enforced — don't claim it as a guarantee.
 - **AI Overviews** are stored as pseudo-URLs `aioverview::<query>` (also `chatgptsearch::`,
   `perplexitysearch::`) so the verbatim answer per query is tracked; excluded from page-fetch enrichment.
+  Note: `ai_overview` rows are NOT in `_WEB_PLATFORMS`, so they don't count toward `stale_or_mixed`/
+  `owned_stale` today (see `docs/OPEN-ITEMS.md`).
 - **Cost:** Sonnet for the judge (accuracy over Haiku — accepted); scope runs with the CLI selectors;
-  fetch cache skips URLs seen < 7 days.
-- **LLM resume** reads `llm_visibility_history.csv` to skip (surface, run_index) combos done today. If a
-  surface is skipped incorrectly, delete today's rows from that CSV.
+  fetch cache skips URLs seen < 7 days; SERP depth is 20 results/query.
+- **LLM resume** reads `llm_visibility_history.csv` to skip **(surface, run_index, prompt)** combos done
+  today (per-prompt). If something is skipped incorrectly, delete today's rows from that CSV.
+- **Empty actor responses** are flagged `status=empty` and never judged (judging empty text fabricates
+  signals). Per-prompt fail-fast: one bad prompt/response becomes one error/empty row, batch continues.
 
 ## Tests
 

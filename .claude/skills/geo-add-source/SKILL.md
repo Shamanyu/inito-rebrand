@@ -28,9 +28,9 @@ discovery-record schema, then crawled + classified like every other source.
      record and the classify loop will prefer it over `ownership(url)`.
    - Use pseudo-URLs (`<thing>::<query>`) for answers with no real page — they're stored but skipped
      by enrichment (`enrich_content` only crawls `http(s)` URLs).
-4. **Proxy:** if the actor needs it, build `proxyConfiguration` (US). Use the `_us_proxy()` helper or
-   `{"useApifyProxy": True, "apifyProxyCountry": CFG.get("proxy_country","US")}`. Reddit needs
-   residential/US (datacenter → 403).
+4. **Proxy:** if the actor needs it, build `{"useApifyProxy": True, "apifyProxyCountry": CFG.get("proxy_country","US")}`.
+   Do **not** name `apifyProxyGroups` unless you know the account has that group — naming `DATACENTER` on a
+   plan without it hard-fails the actor (a real first-run failure). Reddit gets intermittent 429s regardless.
 5. **Register it:** add `"<source>": discover_<source>` to `WEB_DISCOVERERS` **and** add the key to
    `WEB_SOURCES` so it's CLI-selectable. If its rows should count toward stale metrics, add the
    `platform` value to `_WEB_PLATFORMS`.

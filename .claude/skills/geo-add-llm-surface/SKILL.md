@@ -12,30 +12,29 @@ queried via its own Apify web-interface actor and adapted into the common LLM-ro
 - **Live web only.** No API/training-data-only calls (they don't reflect what a user sees, and miss
   citations — our fix targets). If the actor can't do live search with sources, it doesn't qualify.
 
+A surface can be an **Apify actor** (like ChatGPT) **or a direct API** (like Perplexity/sonar). Same
+contract either way: a `_run_<surface>(run_idx, prompts_cfg)` registered in `SURFACE_RUNNERS`.
+
 ## Steps
 
-1. **Confirm the actor on Apify** — slug + input schema + output shape (where the answer text and the
-   **citations/sources** are). Add the slug to `config.json` `actors` with a `_comment_<surface>`.
-2. **Add the surface key to `config.json` `llm_surfaces`** (append-only spirit — it's part of the
-   time series via per-surface metrics).
+1. **Pick the mechanism.** Prefer a reliable live-search **API** if one exists (sonar-style) — web-UI
+   scrapers are anti-bot-fragile (zhorex's Perplexity scraper failed live). Confirm where the **answer
+   text + citations** are. If it's an actor, add its slug to `config.json` `actors`; if an API, add its
+   model/knobs to `limits` and read its key from env (optional, like `PPLX_KEY`).
+2. **Add the surface key to `config.json` `llm_surfaces`** (it's part of the time series via per-surface metrics).
 3. **Write `_run_<surface>(run_idx, prompts_cfg) -> List[dict]`** beside `_run_chatgpt`/`_run_perplexity`:
-   - Build `run_input` (prompts + proxy/country). Pin **US**: a `country` string if the actor takes
-     one, else `proxyConfiguration` via `_us_proxy()`.
-   - `try: items = run_actor(...)` / `except Exception as e: return _error_rows(run_idx, "<surface>", prompts_cfg, e)`
-     — fail-fast into visible error rows, one per prompt.
-   - For each item, extract `prompt`, `response` text, and **citation URLs**; call
-     `_llm_row(run_idx, "<surface>", prompt, intent, response, extra_sources=cites, priors=...)`.
-     `_llm_row` runs the judge, merges sources, and attaches `action` + `priority` for you.
-   - `priors` (optional): if the actor pre-extracts brand signals (like Perplexity brand_monitor's
-     `mentioned`/`position`/`competitorsMentioned`), pass them so the judge has a fallback prior.
+   - **Actor path:** build `run_input` (prompts + `country`/proxy — don't name a proxy group the account
+     lacks); `try: items = run_actor(...)` / `except: return _error_rows(...)` (fail-fast).
+   - **API path:** if the key env is empty, `return _error_rows(...)`; else loop prompts and call your
+     `<api>_complete()` helper with a **per-prompt** try/except (one bad prompt → one error row).
+   - Either way, call `_llm_row(run_idx, "<surface>", prompt, intent, response, extra_sources=cites)`.
+     `_llm_row` skips empty responses (`status=empty`), runs the judge, merges sources, attaches `action`+`priority`.
 4. **Register it:** add `"<surface>": _run_<surface>` to `SURFACE_RUNNERS`.
-5. **Distinct US IPs are automatic.** `num_runs` (default 3, `config.llm_num_runs`) issues each sample
-   as a **separate actor run** → fresh US session → distinct IP. Don't try to force sessions inside
-   one run. Keep each `_run_*` a single actor call over all prompts.
-6. **Tests** (`tests/test_pipeline.py`): monkeypatch `pipe.run_actor` to return canned items; assert
-   `discover_llm_visibility(["<surface>"], prompts, 1)` yields rows with `surface`, `action`,
-   `priority`. Add a failure case (raise in `run_actor`) → `status=="error"`, `priority==6`. Mirror
-   `test_discover_llm_visibility_runs_surface` and `..._error_rows_on_failure`.
+5. **Sampling:** `num_runs` (default 3) gives independent samples (model variance). True per-sample IP
+   control is **not** guaranteed (see DESIGN §5.4) — don't promise it.
+6. **Tests** (`tests/test_pipeline.py`): for an actor, monkeypatch `pipe.run_actor`; for an API, monkeypatch
+   the `*_complete` helper + its key. Assert rows have `surface`, `action`, `priority`; add a failure case
+   → `status=="error"`, `priority==6`. Mirror `test_run_perplexity_*` and `..._error_rows_on_failure`.
 7. **Verify:** `pytest -q`, then a **`geo-dry-run`** with `--surfaces <surface>` to confirm
    discover → judge → `derive_action` → `persist_llm` → `export_llm_csv` → `compute_llm_metrics`
    and that per-surface CIs appear in `llm_metrics.csv` (`llm_<surface>_mention` etc).

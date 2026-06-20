@@ -23,9 +23,9 @@ On-demand:
 Env (.env):  APIFY_TOKEN, ANTHROPIC_API_KEY
 """
 
-import argparse, json, os, re, shutil, sys, time, datetime as dt
+import argparse, json, os, re, shutil, sys, time, datetime as dt, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, List, Dict, Optional
+from typing import Callable, List, Dict, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 
@@ -57,6 +57,9 @@ _require_env("APIFY_TOKEN", "ANTHROPIC_API_KEY")
 
 apify = ApifyClient(os.environ["APIFY_TOKEN"])
 claude = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+# Optional — only the Perplexity (sonar) surface needs it. Absent ⇒ that surface fails fast into
+# error rows; the rest of the pipeline is unaffected.
+PPLX_KEY = os.environ.get("PERPLEXITY_API_KEY", "")
 
 
 # ---------- helpers ----------
@@ -96,11 +99,20 @@ def _to_bool(series: pd.Series) -> pd.Series:
 def _extract_urls(text: str) -> List[str]:
     return re.findall(r'https?://[^\s\)\]\"\'>,]+', text or "")
 
-def _us_proxy() -> dict:
-    """Apify proxy config pinned to the US (used by actors that accept a proxyConfiguration object)."""
-    return {"useApifyProxy": True,
-            "apifyProxyGroups": [CFG.get("llm_proxy_group", "DATACENTER")],
-            "apifyProxyCountry": CFG.get("proxy_country", "US")}
+def perplexity_complete(prompt: str, model: str) -> Tuple[str, List[str]]:
+    """Call Perplexity's sonar API directly (OpenAI-compatible) — always live web search + citations.
+    Returns (answer_text, source_urls). Raises on transport/HTTP error (caller turns it into an
+    error row, fail-fast)."""
+    req = urllib.request.Request(
+        "https://api.perplexity.ai/chat/completions",
+        data=json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode(),
+        headers={"Authorization": f"Bearer {PPLX_KEY}", "Content-Type": "application/json"},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=90) as r:
+        data = json.loads(r.read().decode())
+    answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+    sources = data.get("citations") or [s.get("url", "") for s in (data.get("search_results") or [])]
+    return answer, [s for s in sources if s]
 
 
 # ---------- stage 1: discover (Track A) ----------
@@ -768,9 +780,26 @@ def _mean_ci(values: list, z: float = 1.96):
     return round(mu, 3), round(mu - z * se, 3), round(mu + z * se, 3)
 
 
+def _empty_row(run_idx, surface, prompt, intent, note: str) -> dict:
+    """A response with no usable text (actor nav/anti-bot failure) — never judged, flagged in the sheet."""
+    row = {"run_date": RUN_DATE, "run_index": run_idx, "surface": surface, "prompt": prompt,
+           "intent": intent, "response_text": "", "inito_mentioned": None, "inito_rank": None,
+           "inito_recommended": None, "stale_product_described": None, "stale_excerpt": None,
+           "sources_cited": "[]", "sentiment_inito": None, "competitors_named": "[]",
+           "competitor_preferred": None, "confidence": None, "status": "empty", "error_note": note}
+    row["action"] = f"Empty response — {note} (no judgement; fix the actor/surface)"
+    row["priority"] = 6
+    return row
+
+
 def _llm_row(run_idx, surface, prompt, intent, response_text, extra_sources=None,
              priors=None) -> dict:
-    """Judge one assistant response and build a visibility row (with action + priority)."""
+    """Judge one assistant response and build a visibility row (with action + priority).
+    An empty/blank response is NOT judged — it means the actor returned nothing (e.g. nav timeout),
+    and judging it fabricates signals."""
+    if not (response_text or "").strip():
+        return _empty_row(run_idx, surface, prompt, intent,
+                          "actor returned no answer text (navigation/anti-bot failure)")
     verdict = judge_llm_response(prompt, surface, response_text)
     priors = priors or {}
     judge_sources = verdict.get("sources_cited") or []
@@ -835,28 +864,21 @@ def _run_chatgpt(run_idx: int, prompts_cfg: List[dict]) -> List[dict]:
 
 
 def _run_perplexity(run_idx: int, prompts_cfg: List[dict]) -> List[dict]:
-    """zhorex/perplexity-ai-scraper — live Perplexity, brand_monitor mode. Distinct US IP per run."""
-    intent_map = {p["prompt"]: p["intent"] for p in prompts_cfg}
-    prompts = [p["prompt"] for p in prompts_cfg]
-    run_input = {"queries": prompts, "mode": "brand_monitor", "brandName": "Inito",
-                 "maxQueries": len(prompts),
-                 "waitTimeout": CFG["limits"].get("perplexity_wait_timeout", 60),
-                 "proxyConfiguration": _us_proxy()}
-    try:
-        items = run_actor(CFG["actors"]["perplexity"], run_input, f"perplexity/run{run_idx}")
-    except Exception as e:
-        return _error_rows(run_idx, "perplexity", prompts_cfg, e)
+    """Perplexity via the sonar API (direct, no Apify). Live web search + citations. Web-interface
+    scrapers (zhorex etc.) are anti-bot-walled, so the API — which the product itself runs on — is the
+    reliable equivalent. No proxy/IP control here; the 3 samples capture model variance, not IP variance."""
+    if not PPLX_KEY:
+        return _error_rows(run_idx, "perplexity", prompts_cfg,
+                           "PERPLEXITY_API_KEY not set — add it to .env to enable the Perplexity surface")
+    model = CFG["limits"].get("perplexity_model", "sonar")
     rows = []
-    for it in items:
-        prompt = it.get("query") or it.get("prompt") or ""
-        if not prompt:
-            continue
-        response = it.get("answer") or it.get("response") or ""
-        actor_sources = [s.get("url", "") for s in (it.get("sources") or []) if s.get("url")]
-        priors = {"mentioned": it.get("mentioned"), "position": it.get("position"),
-                  "competitors": it.get("competitorsMentioned", [])}
-        rows.append(_llm_row(run_idx, "perplexity", prompt, intent_map.get(prompt, "unknown"),
-                             response, extra_sources=actor_sources, priors=priors))
+    for p in prompts_cfg:
+        try:
+            answer, sources = perplexity_complete(p["prompt"], model)
+            rows.append(_llm_row(run_idx, "perplexity", p["prompt"], p["intent"],
+                                 answer, extra_sources=sources))
+        except Exception as e:
+            rows.append(_error_rows(run_idx, "perplexity", [p], e)[0])  # fail-fast, per-prompt
     return rows
 
 
@@ -936,7 +958,8 @@ def _coerce_llm(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _completed_combos() -> set:
-    """Resume: (surface, run_index) combos already completed today (real data, not error rows)."""
+    """Resume at (surface, run_index, prompt) granularity — so a partial run (one prompt) doesn't
+    mark the whole (surface, run) done and skip the rest. Counts real data only, not error rows."""
     hist = DATA / "llm_visibility_history.csv"
     if not hist.exists():
         return set()
@@ -945,40 +968,45 @@ def _completed_combos() -> set:
         today = prev[prev["run_date"].astype(str) == RUN_DATE]
         if "inito_mentioned" in today.columns:
             today = today[today["inito_mentioned"].notna()]
-        return {(str(r["surface"]), int(r["run_index"])) for _, r in today.iterrows()}
+        return {(str(r["surface"]), int(r["run_index"]), str(r["prompt"])) for _, r in today.iterrows()}
     except Exception as exc:
         log(f"  resume check failed (will re-run all): {exc}")
         return set()
 
 
 def discover_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: int) -> List[dict]:
-    """Run each surface × prompt × run in parallel. Each run is a separate actor call so it draws a
-    fresh US proxy session — 3 runs => 3 distinct US IPs (FR-B2a). Resumes today's missing combos."""
+    """Run each surface × prompt × run in parallel. Each (surface, run) is one runner call; runs are
+    separate so they sample independently. Resume skips per-(surface, run, prompt) already done today."""
     completed = _completed_combos()
     if completed:
-        log(f"  resume: {len(completed)} (surface, run) combos already done today — skipping")
-    jobs = [(s, r) for s in surfaces for r in range(1, num_runs + 1)
-            if (s, r) not in completed]
+        log(f"  resume: {len(completed)} (surface, run, prompt) already done today — skipping those")
+    # per (surface, run): only the prompts not yet completed
+    jobs = []
+    for s in surfaces:
+        for r in range(1, num_runs + 1):
+            todo = [p for p in prompts_cfg if (s, r, p["prompt"]) not in completed]
+            if todo:
+                jobs.append((s, r, todo))
 
-    def _one(surface, run_idx):
+    def _one(surface, run_idx, todo):
         runner = SURFACE_RUNNERS.get(surface)
         if not runner:
-            return _error_rows(run_idx, surface, prompts_cfg, f"unknown surface '{surface}'")
-        log(f"  LLM visibility: {surface} run {run_idx}/{num_runs} ({len(prompts_cfg)} prompts)")
-        return runner(run_idx, prompts_cfg)
+            return _error_rows(run_idx, surface, todo, f"unknown surface '{surface}'")
+        log(f"  LLM visibility: {surface} run {run_idx}/{num_runs} ({len(todo)} prompts)")
+        return runner(run_idx, todo)
 
     rows = []
     if not jobs:
         return rows
     with ThreadPoolExecutor(max_workers=min(len(jobs), 10)) as ex:
-        futures = {ex.submit(_one, s, r): (s, r) for s, r in jobs}
+        futures = {ex.submit(_one, s, r, todo): (s, r, todo) for s, r, todo in jobs}
         for fut in as_completed(futures):
-            s, r = futures[fut]
+            s, r, todo = futures[fut]
             try:
                 rows.extend(fut.result())
             except Exception as e:
                 log(f"  {s}/run{r} unexpected thread error: {e}")
-                rows.extend(_error_rows(r, s, prompts_cfg, e))
+                rows.extend(_error_rows(r, s, todo, e))
     log(f"  LLM visibility: {len(rows)} observations ({num_runs} run(s) × {len(surfaces)} surface(s))")
     return rows
 

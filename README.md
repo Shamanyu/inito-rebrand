@@ -31,10 +31,10 @@ Each row is one URL/ad with: ownership (owned / owned_marketplace / competitor /
 ```
 discover (parallel, live web)        classify              persist + metrics
 ─────────────────────────────        ────────              ─────────────────
-ChatGPT   (tri_angle/gpt-search) ──► Claude Sonnet judge ─► llm_visibility_<date>.csv
-Perplexity(zhorex/perplexity...)     (mentioned, rank,      llm_visibility_history.csv
+ChatGPT  (tri_angle/gpt-search) ───► Claude Sonnet judge ─► llm_visibility_<date>.csv
+Perplexity (sonar API, direct)       (mentioned, rank,      llm_visibility_history.csv
   3 samples / (prompt×surface),       recommended, stale,   llm_visibility_latest.csv (→Sheets)
-  each from a distinct US IP          sentiment, sources,   llm_metrics.csv (time series)
+  pooled for Wilson CIs               sentiment, sources,   llm_metrics.csv (time series)
                                       action + priority)    llm_visibility_stats.csv (per-prompt CIs)
 ```
 
@@ -57,9 +57,12 @@ data/           outputs (gitignored, CSV only)
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # add APIFY_TOKEN + ANTHROPIC_API_KEY
+cp .env.example .env          # APIFY_TOKEN + ANTHROPIC_API_KEY (+ optional PERPLEXITY_API_KEY)
 export $(grep -v '^#' .env | xargs)
 ```
+
+`PERPLEXITY_API_KEY` is optional — only the Perplexity surface needs it (sonar API). Without it,
+that surface cleanly emits error rows and the rest of the run is unaffected.
 
 Before the first run, open each actor's page in the Apify Store and confirm its **slug** and **input
 schema** (they get versioned). For ads, populate `config.ads_start_urls` with Google Ads Transparency
@@ -96,7 +99,7 @@ CSVs plus a `run_info.csv`. Cumulative history + time series live at the `data/`
 - **ads_start_urls** — Google Ads Transparency Center URLs (advertiser/domain).
 - **claim_patterns** — regex heuristics; the judge resolves ambiguity. Add patterns for new phrasings (never for shared attributes like hormones/app).
 - **owned/competitor_domains** — drive the ownership column and the `owned_stale` metric.
-- **llm_surfaces** — live-web assistants to query (`chatgpt`, `perplexity`); each maps to an actor.
+- **llm_surfaces** — live-web assistants to query (`chatgpt` via Apify actor, `perplexity` via sonar API).
 - **limits.judge_model** — `claude-sonnet-4-6` (Opus available for max accuracy). IDs: https://docs.claude.com/en/docs/about-claude/models
 
 ## Tests
@@ -125,8 +128,9 @@ scheduled share one codebase.
 
 ## Known limits
 
-- Track B depends on web-interface scraper reliability (anti-bot / rate-limits). Failures fail fast into
-  visible error rows; two surfaces give redundancy.
-- Distinct-IP sampling is best-effort (Apify session→IP, pool-size dependent).
-- Ad→competitor matching is by domain label; advertiser display names may differ (add a brand list if needed).
-- Ownership for app-store / Amazon / ads is heuristic — verify seller/owner in edge cases.
+See `docs/OPEN-ITEMS.md` for the live, focused list. In brief:
+- ChatGPT (Apify actor) depends on scraper reliability (anti-bot / approval); Perplexity (sonar API) is
+  reliable but needs a key. Failures fail fast into visible error rows.
+- The 3 samples capture model variance; only ChatGPT pins US (via the actor's `country`), Perplexity has
+  no IP control. Reddit gets intermittent 429s.
+- Ad→competitor matching is by domain label; ownership for app-store / Amazon / ads is heuristic.
