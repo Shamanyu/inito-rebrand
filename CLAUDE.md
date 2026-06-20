@@ -97,6 +97,16 @@ pass them (comma-separated indices or name substrings, or `all`) for scripted ru
 all/specs without prompting. `--num-runs` overrides samples-per-(prompt×surface). `--note` is folded
 into the run-folder name.
 
+## Skills (`.claude/skills/`)
+
+Workflow skills encode the conventions below so feature work stays safe and fast. Use them:
+
+- **geo-safe-change** — read first for any change; the invariants + verify loop (this section, expanded).
+- **geo-add-source** — add a Track A discovery source (Apify actor).
+- **geo-add-llm-surface** — add a Track B live-web assistant.
+- **geo-tune-classifier** — adjust claim regex / judge prompts without false positives.
+- **geo-dry-run** — hermetic end-to-end verification (stubbed actors + Claude); ships a harness template.
+
 ## Invariants — do not break these
 
 - **`config.json` queries + llm_visibility_prompts are append-only.** Editing an existing string
