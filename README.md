@@ -74,6 +74,8 @@ Center URLs (one advertiser/domain each; keep `region=US`) — Inito's own first
 python pipeline.py --refresh     # Track A — interactive: pick sources + queries
 python pipeline.py --llm          # Track B — interactive: pick surfaces + prompts
 python pipeline.py --diff-only    # recompute metrics + diff, no crawling
+python pipeline.py --reeval       # Track B — re-run attribution/action/metrics on today's stored
+                                  #   responses; no ChatGPT/Apify re-query, no crawling
 ```
 
 Run however you want — scope with selectors, or omit them for a multiple-choice menu:

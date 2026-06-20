@@ -42,8 +42,13 @@ Runs via `run_llm_visibility()`, invoked by `--llm`.
    Resume skips **(surface, run_index, prompt)** combos already written today (per-prompt, not per-run).
 2. **judge_llm_response** — Claude Sonnet classifies each response: mentioned, rank, recommended,
    stale_product_described, stale_excerpt, sources_cited, sentiment, competitors, confidence.
-3. **derive_action** + **link_stale_sources** — a prioritized, source-targeted action per row;
-   cross-references cited stale URLs against the Track A web history.
+3. **verify_stale_attribution** + **derive_action** — attribution is quote-grounded: a cited source is
+   only blamed for a stale claim if it's verified to actually contain stale text (already stale/mixed
+   in the Track A web history, already in the fetch cache and trips the claim regex, or freshly
+   fetched). `derive_action` then assigns one prioritized, source-targeted action per row from
+   `verified_stale_sources` — never "fix our own page" just because the brand site appears in the
+   citation list (the misattribution bug this replaced). `--reeval` re-runs this step alone on today's
+   already-captured responses (no re-query, no crawl, no fetch of new sources).
 4. **persist_llm** → `llm_visibility_<date>.csv` + history; `export_llm_csv` →
    `llm_visibility_latest.csv` (clickable sources, `action`, `priority`, error notes).
 5. **compute_llm_metrics** — Wilson CI for binary rates, mean±SE for sentiment, per-surface breakdown.
@@ -89,6 +94,8 @@ python pipeline.py --refresh               # Track A; interactive source/query m
 python pipeline.py --llm                    # Track B; interactive surface/prompt multiple-choice
 python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1 -y   # scripted, no prompts
 python pipeline.py --diff-only             # recompute metrics + diff, no crawling
+python pipeline.py --reeval                # Track B: re-run attribution/action/metrics on today's
+                                            #   stored responses only — no re-query, no crawl
 pytest -q                                   # offline tests
 ```
 

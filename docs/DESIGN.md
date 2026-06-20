@@ -96,7 +96,7 @@ is a CLI invocation; the same code runs locally or as a scheduled Apify Actor.
 | **Discover (B)** | `_run_chatgpt` (`tri_angle/gpt-search` actor), `_run_perplexity` (`perplexity_complete()` sonar API), via `SURFACE_RUNNERS` | Query live assistants in parallel; capture answer + citations. **Removed:** `discover_llm_visibility` (bulk runner). |
 | **Persist/Export (B)** | `persist_llm`, `export_llm_csv`, `export_serp_csv`, `derive_action`, `_sources_to_plain` | CSV outputs + action derivation. |
 | **Metrics (B)** | `compute_llm_metrics`, `_wilson_ci`, `_mean_ci` | Wilson/mean CIs per prompt/surface/overall. |
-| **Cross-track** | `link_stale_sources` *(new)* | Join Track B cited stale URLs to Track A observations (FR-ACT7). |
+| **Cross-track** | `verify_stale_attribution` | Quote-grounds stale attribution: confirms each cited source actually contains stale text (Track A history, fetch cache, or live fetch) before `derive_action` blames it (FR-ACT7). |
 | **Orchestration** | `refresh`, `run_llm_visibility`, `diff_only`, `_safe_discover`, `__main__` | Parallel stage sequencing + CLI. |
 
 ## 4. Track A — Web/SERP Data Flow (target)
@@ -156,7 +156,8 @@ run_llm_visibility()
         │     on failure: FAIL FAST → one error row per affected prompt (error_note set)
    └─ persist_llm(rows) → llm_visibility_<date>.csv + llm_visibility_history.csv
         └─ export_llm_csv() → llm_visibility_latest.csv (action, clickable sources, error notes)
-   └─ link_stale_sources(rows) → cross-reference cited stale URLs with Track A observations
+   └─ verify_stale_attribution(rows) → quote-ground stale attribution (Track A history / fetch cache /
+        live fetch), set verified_stale_sources, re-derive action
    └─ compute_llm_metrics(df) → llm_metrics.csv + llm_visibility_stats.csv
    └─ export_serp_csv() → serp_latest.csv
 ```
@@ -305,8 +306,11 @@ data/
 | recommended / positive | Monitor only | 5 |
 
 Source targeting comes from `sources_cited`; ownership of each cited URL is computed with `ownership()`.
-**Cross-track linkage** (`link_stale_sources`) checks whether a cited stale URL already exists in
-`observations_history.csv` so the analyst inherits full page-level context for the same fix.
+**Quote-grounded attribution** (`verify_stale_attribution`) only blames a cited source for a stale claim
+if that source is verified to actually contain stale text — checked against `observations_history.csv`
+(free), the page-text fetch cache (free), or a live fetch (`--reeval` skips this step, spending zero
+tokens on re-evaluation). This prevents "fix our own page" actions firing just because the brand site
+appears in the citation list.
 
 ## 10. Error Handling & Resilience (fail-fast)
 
@@ -394,6 +398,6 @@ The live, prioritized list lives in `docs/OPEN-ITEMS.md`. Design-level notes:
 | Ownership routing | `ownership()` + `config` domain lists |
 | State & time series | `data/` **CSV** (snapshot+history pattern) |
 | Statistics | `_wilson_ci`, `_mean_ci`, `_kappa_regex_vs_judge`, `_run_quality_score` |
-| Recommended actions | `derive_action` + `link_stale_sources` (source-targeted, prioritized) |
+| Recommended actions | `derive_action` + `verify_stale_attribution` (quote-grounded, source-targeted, prioritized) |
 | Behavior control | `config.json` |
 | Orchestration, parallelism & resilience | `refresh` / `run_llm_visibility` / `_safe_discover` / CLI |
