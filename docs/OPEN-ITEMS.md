@@ -5,7 +5,11 @@ Tiny, living list. Updated 2026-06-20 (first live run). Keep it short — prune 
 ## Known limitations (live now)
 - **Track B IP control is not enforced.** 3 samples capture model variance, not IP variance (DESIGN §5.4).
 - **AI-Overview stale claims aren't counted** in `owned_stale`/`stale_or_mixed` (platform excluded from `_WEB_PLATFORMS`).
-- **Stale-claim → source attribution is heuristic** — the LLM's stale text is attributed to its cited sources, which may not be the true origin.
+- **Source attribution is now quote-grounded** (`verify_stale_attribution`): a stale claim is blamed on a
+  source only if that source is judged stale in Track A history OR fetching it + the claim regex confirms
+  it — so we no longer say "fix our own page" for a clean page. Residual: newly-fetched sources are
+  verified by **regex**, not the full Sonnet judge (cheaper, slightly coarser); see next steps.
+- **No accuracy measurement yet** — only regex↔judge kappa, not precision/recall vs a labeled gold set.
 - **Reddit** returns results through intermittent `429` rate-limits (partial coverage).
 - **CSV typing** — values reload as strings; only coerced columns are safe for math.
 
@@ -25,6 +29,7 @@ Tiny, living list. Updated 2026-06-20 (first live run). Keep it short — prune 
 
 ## Next steps (high level)
 1. Finish the first full Track A run; review the real `owned_stale` fix-target list.
-2. Turn on Perplexity (key) → rerun Track B for full 3-surface coverage.
-3. Add `ads_start_urls` → first ads sweep (catches stale copy in our *own* ads).
-4. Then iterate: AI-Overview metric inclusion, parallel judging for cost/speed, scheduling + Slack digest.
+2. **Re-run Track B with the quote-grounded attribution fix** (the prior run's action column was misattributed).
+3. **Accuracy: build a small gold set** (~40 pages + ~40 answers, hand-labeled) and score precision/recall on every change.
+4. Upgrade source verification from regex → Sonnet judge (higher accuracy) once the gold set exists to measure it.
+5. Turn on Perplexity (key) and add `ads_start_urls`; then AI-Overview metric inclusion, parallel judging, scheduling + Slack digest.

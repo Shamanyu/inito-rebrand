@@ -93,6 +93,8 @@
     "news_max_per_query": 20,
     "reddit_max_items": 120,
     "ads_max_items": 100,
+    "verify_max_fetch": 40,
+    "_comment_verify": "Max cited sources to fetch+check when quote-grounding a stale claim's attribution (verify_stale_attribution). Sources already judged stale in Track A history are free.",
     "perplexity_model": "sonar",
     "_comment_perplexity_model": "Perplexity sonar API model: 'sonar' (cheap, live search) or 'sonar-pro' (deeper). Used by perplexity_complete().",
     "judge_model": "claude-sonnet-4-6",

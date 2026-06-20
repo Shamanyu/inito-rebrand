@@ -888,62 +888,111 @@ SURFACE_RUNNERS: Dict[str, Callable] = {
 }
 
 
-def derive_action(row: dict):
-    """One prioritized, source-targeted action for a visibility row. Returns (action, priority)."""
-    if row.get("status") == "error":
-        return f"Actor failed — see error_note (fail-fast)", 6
-    sources = []
+def _json_urls(val) -> List[str]:
     try:
-        sources = [s for s in json.loads(row.get("sources_cited") or "[]") if s.startswith("http")]
+        return [s for s in json.loads(val or "[]") if isinstance(s, str) and s.startswith("http")]
     except Exception:
-        pass
-    owned = [s for s in sources if ownership(s) in ("owned", "owned_marketplace")]
-    competitor = [s for s in sources if ownership(s) == "competitor"]
-    third = [s for s in sources if ownership(s) == "third_party"]
+        return []
+
+
+def derive_action(row: dict):
+    """One prioritized, source-targeted action for a visibility row. Returns (action, priority).
+
+    Attribution is **quote-grounded**: a stale claim is blamed on a source only if that source was
+    verified to actually contain stale content (`verified_stale_sources`, set by
+    verify_stale_attribution). We never tell the team to "fix our own page" just because the brand
+    site appears in the citation list — that was the misattribution bug."""
+    if row.get("status") == "error":
+        return "Actor failed — see error_note (fail-fast)", 6
+    cited = _json_urls(row.get("sources_cited"))
+    verified = _json_urls(row.get("verified_stale_sources"))
+    competitor_cited = [s for s in cited if ownership(s) == "competitor"]
     high_intent = row.get("intent") in ("comparison", "purchase", "brand_entity")
 
     if row.get("stale_product_described"):
-        if owned:
-            return f"Fix our own page now: {owned[0]}", 1
-        if competitor:
-            return f"Competitor source carries stale Inito claim — publish counter-content / request correction: {competitor[0]}", 2
-        if third:
-            return f"Outreach to publisher to correct; else outrank with corrected content: {third[0]}", 2
-        return "Stale claim with no cited source — investigate this surface", 2
+        v_owned = [s for s in verified if ownership(s) in ("owned", "owned_marketplace")]
+        v_comp = [s for s in verified if ownership(s) == "competitor"]
+        v_third = [s for s in verified if ownership(s) == "third_party"]
+        if v_owned:
+            return f"Fix our own page now (verified stale): {v_owned[0]}", 1
+        if v_third:
+            return f"Outreach to publisher to correct (verified stale source): {v_third[0]}", 2
+        if v_comp:
+            return f"Competitor source carries the stale claim — counter-content / correction: {v_comp[0]}", 2
+        # stale in the answer but NOT found in any cited source → likely model training data, not a page we can fix
+        return "Stale claim in the answer but not in any cited source — likely model training data; submit provider feedback", 3
     if not row.get("inito_mentioned"):
         return ("Not visible — create/optimize content ranking for this prompt's terms",
                 3 if high_intent else 4)
     cp = row.get("competitor_preferred")
     if cp and not row.get("inito_recommended"):
-        src = f" (cited: {competitor[0]})" if competitor else ""
+        src = f" (cited: {competitor_cited[0]})" if competitor_cited else ""
         return f"Competitor '{cp}' preferred{src} — build comparison content to outrank", 3
     if row.get("inito_recommended"):
         return "Positive — monitor to ensure this holds", 5
     return "Neutral mention — strengthen positioning content", 4
 
 
-def link_stale_sources(rows: List[dict]) -> None:
-    """Cross-track: flag cited stale-source URLs that also appear in the Track A web history."""
-    hist = DATA / "observations_history.csv"
-    if not hist.exists():
-        for r in rows:
-            r.setdefault("stale_source_seen_in_web", "")
-        return
-    try:
-        web_urls = set(pd.read_csv(hist)["url"].astype(str))
-    except Exception:
-        web_urls = set()
+def _text_is_stale(txt: str) -> bool:
+    f = detect_claims(txt or "")
+    return any(f.get(k) for k in ("iphone_only", "attach_to_phone", "camera_dependent", "no_android"))
+
+
+def verify_stale_attribution(rows: List[dict], fetch_missing: bool = True) -> None:
+    """Quote-ground the stale attribution: for each stale row, mark which of its cited sources
+    *actually contain* stale content — so we never blame a clean page (the misattribution bug).
+
+    A cited source is a verified stale source if it's (1) already judged stale/mixed in the Track A web
+    history, (2) already in the page-text cache and trips the claim regex, or (3) fetched now and trips
+    it. Steps 1–2 are FREE (no parsing). `fetch_missing=False` (re-eval mode) skips step 3 entirely, so
+    re-evaluating stored data spends zero parsing tokens — uncached sources just stay unverified.
+    Sets `row['verified_stale_sources']` and re-derives the action."""
     for r in rows:
-        match = ""
-        if r.get("stale_product_described"):
-            try:
-                for s in json.loads(r.get("sources_cited") or "[]"):
-                    if normalize_url(s) in web_urls:
-                        match = s
-                        break
-            except Exception:
-                pass
-        r["stale_source_seen_in_web"] = match
+        r.setdefault("verified_stale_sources", "[]")
+    stale_rows = [r for r in rows if r.get("status") == "ok" and r.get("stale_product_described")]
+    if not stale_rows:
+        return
+
+    # (1) free: sources already judged stale/mixed in Track A history
+    verified_norm = set()
+    hist = DATA / "observations_history.csv"
+    if hist.exists():
+        try:
+            df = pd.read_csv(hist)
+            verified_norm = {normalize_url(u) for u in
+                             df[df["status"].astype(str).isin(["stale", "mixed"])]["url"].astype(str)}
+        except Exception:
+            pass
+
+    cited_norm = {normalize_url(s) for r in stale_rows for s in _json_urls(r.get("sources_cited"))}
+
+    # (2) free: sources already in the page-text cache that trip the claim regex
+    try:
+        cache = load_fetch_cache()
+    except Exception:
+        cache = {}
+    for nu in cited_norm - verified_norm:
+        if nu in cache and _text_is_stale(cache[nu]):
+            verified_norm.add(nu)
+
+    # (3) optional spend: fetch the rest (skipped in re-eval mode)
+    if fetch_missing:
+        to_fetch = [nu for nu in (cited_norm - verified_norm) if nu.startswith("http")]
+        to_fetch = to_fetch[:CFG["limits"].get("verify_max_fetch", 40)]
+        if to_fetch:
+            log(f"  verify attribution: fetching {len(to_fetch)} cited source(s) to confirm stale claims")
+            for nu, txt in enrich_content(to_fetch).items():
+                if _text_is_stale(txt):
+                    verified_norm.add(nu)
+
+    for r in stale_rows:
+        r["verified_stale_sources"] = json.dumps(
+            [s for s in _json_urls(r.get("sources_cited")) if normalize_url(s) in verified_norm])
+
+    # re-derive actions now that attribution is verified
+    for r in rows:
+        if r.get("status") == "ok":
+            r["action"], r["priority"] = derive_action(r)
 
 
 def _coerce_llm(df: pd.DataFrame) -> pd.DataFrame:
@@ -1033,12 +1082,12 @@ def export_llm_csv(rows: List[dict], out_dir: Path) -> None:
         "inito_rank": "rank_in_response", "inito_recommended": "recommended",
         "stale_product_described": "stale_claim", "stale_excerpt": "stale_quote",
         "sources_cited": "sources (clickable URLs)", "sentiment_inito": "sentiment (-1 to +1)",
-        "competitors_named": "competitors_mentioned",
+        "competitors_named": "competitors_mentioned", "verified_stale_sources": "verified_stale_source",
     }
     df = df.rename(columns=col_map)
     ordered = ["date", "surface", "prompt", "intent", "priority", "action",
                "mentioned", "rank_in_response", "recommended", "sentiment (-1 to +1)",
-               "stale_claim", "stale_quote", "stale_source_seen_in_web",
+               "stale_claim", "stale_quote", "verified_stale_source",
                "competitors_mentioned", "competitor_preferred", "sources (clickable URLs)",
                "response_text", "run_#", "status", "error_note", "confidence"]
     ordered = [c for c in ordered if c in df.columns]
@@ -1157,7 +1206,8 @@ def run_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: i
         log("no LLM visibility rows — nothing to do (all combos may already be done today)")
         _cleanup_empty(out_dir)
         return
-    link_stale_sources(rows)
+    log("LLM VISIBILITY verify stale attribution")
+    verify_stale_attribution(rows)
     log("LLM VISIBILITY persist")
     df_all = persist_llm(rows, out_dir)
     log("LLM VISIBILITY metrics")
@@ -1167,6 +1217,42 @@ def run_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: i
                              "num_runs": num_runs},
                   cumulative=["llm_visibility_history.csv", "llm_metrics.csv"])
     log(f"LLM visibility done in {time.time()-t0:.0f}s -> {out_dir}")
+
+
+def _bool_or_none(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    return True if s in ("true", "1") else False if s in ("false", "0") else None if s in ("", "nan", "none") else bool(v)
+
+
+def reeval_llm(out_dir: Path):
+    """Evaluation engine over ALREADY-CAPTURED raw LLM responses — re-runs attribution + action +
+    metrics on today's stored rows, with NO ChatGPT/Apify re-query and NO crawling (cache + history
+    only). This is the parse/evaluate separation: re-judge logic changes cheaply on stored data."""
+    t0 = time.time()
+    hist = DATA / "llm_visibility_history.csv"
+    if not hist.exists():
+        sys.exit("no LLM history to re-evaluate — run --llm first")
+    df = pd.read_csv(hist)
+    df = df.where(pd.notna(df), None)
+    rows = df[df["run_date"].astype(str) == RUN_DATE].to_dict("records")
+    if not rows:
+        sys.exit(f"no stored LLM rows for {RUN_DATE} to re-evaluate")
+    for r in rows:                       # restore types lost to CSV roundtrip
+        for b in ("inito_mentioned", "inito_recommended", "stale_product_described"):
+            r[b] = _bool_or_none(r.get(b))
+        r["status"] = r.get("status") or "ok"
+        r["sources_cited"] = r.get("sources_cited") or "[]"
+    log(f"RE-EVAL: {len(rows)} stored observations (no re-query; cache + history only)")
+    verify_stale_attribution(rows, fetch_missing=False)
+    df_all = persist_llm(rows, out_dir)
+    compute_llm_metrics(df_all, out_dir)
+    _finalize_run(out_dir, track="llm-reeval",
+                  selection={"note": "re-evaluated stored responses, no re-query",
+                             "rows": len(rows)},
+                  cumulative=["llm_visibility_history.csv", "llm_metrics.csv"])
+    log(f"RE-EVAL done in {time.time()-t0:.0f}s -> {out_dir}")
 
 
 # ---------- run folders + interactive selection ----------
@@ -1260,6 +1346,8 @@ def main(argv=None):
     ap.add_argument("--refresh", action="store_true", help="Track A: web/SERP/news/ads/reddit")
     ap.add_argument("--llm", action="store_true", help="Track B: live-web LLM assistants")
     ap.add_argument("--diff-only", action="store_true", help="recompute metrics + diff, no crawling")
+    ap.add_argument("--reeval", action="store_true",
+                    help="Track B: re-run the evaluation engine on today's stored responses (no re-query, no crawl)")
     ap.add_argument("--sources", help="Track A sources (e.g. 'serp,reddit' or 'all')")
     ap.add_argument("--queries", help="Track A queries (indices/names, or 'all')")
     ap.add_argument("--surfaces", help="Track B surfaces (e.g. 'chatgpt' or 'all')")
@@ -1271,6 +1359,9 @@ def main(argv=None):
 
     if a.diff_only:
         diff_only(); return
+    if a.reeval:
+        out_dir = make_run_dir("llm-reeval", ["chatgpt+perplexity"], [0], note=a.note or "reeval")
+        reeval_llm(out_dir); return
     if a.llm:
         surfaces = prompt_select(CFG["llm_surfaces"], lambda s: s,
                                  "Surfaces:", a.surfaces, a.yes)

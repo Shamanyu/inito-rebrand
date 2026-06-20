@@ -356,16 +356,28 @@ def _arow(pipe, **kw):
     return base
 
 def test_action_owned_stale_is_top_priority(pipe):
+    # blame an owned page ONLY when it's a verified stale source
     row = _arow(pipe, stale_product_described=True,
-                sources_cited=json.dumps(["https://inito.com/old-page"]))
+                sources_cited=json.dumps(["https://inito.com/old-page"]),
+                verified_stale_sources=json.dumps(["https://inito.com/old-page"]))
     action, prio = pipe.derive_action(row)
     assert prio == 1 and "inito.com/old-page" in action
 
 def test_action_thirdparty_stale_priority_2(pipe):
     row = _arow(pipe, stale_product_described=True,
-                sources_cited=json.dumps(["https://leafsnap.com/inito"]))
+                sources_cited=json.dumps(["https://leafsnap.com/inito"]),
+                verified_stale_sources=json.dumps(["https://leafsnap.com/inito"]))
     _, prio = pipe.derive_action(row)
     assert prio == 2
+
+def test_action_stale_but_no_verified_source_is_not_fix_our_page(pipe):
+    # regression: brand site cited but NOT verified stale -> must NOT say "fix our own page"
+    row = _arow(pipe, stale_product_described=True,
+                sources_cited=json.dumps(["https://inito.com/en-us"]),  # clean page, cited for general info
+                verified_stale_sources="[]")
+    action, prio = pipe.derive_action(row)
+    assert prio == 3 and "fix our own page" not in action.lower()
+    assert "training data" in action.lower() or "not in any cited source" in action.lower()
 
 def test_action_not_mentioned_high_vs_low_intent(pipe):
     hi = pipe.derive_action(_arow(pipe, inito_mentioned=False, intent="comparison"))
@@ -381,15 +393,68 @@ def test_action_recommended_is_monitor(pipe):
     assert prio == 5 and "monitor" in action.lower()
 
 
-# ---------- cross-track linkage ----------
-def test_link_stale_sources_matches_web_history(pipe):
+# ---------- quote-grounded attribution (the misattribution fix) ----------
+def test_verify_stale_attribution_clears_clean_owned_page(pipe, monkeypatch):
+    # Reproduces the real bug: ChatGPT's answer is stale and cites BOTH a clean owned page and a
+    # third-party review that actually contains the claim. We must blame the review, not our page.
+    OWNED_CLEAN = "Inito InSight Wireless Reader works on iOS and Android. Measures four hormones."
+    THIRD_STALE = "It clips onto your phone and reads the strip using your camera. iPhone-only for now."
+    monkeypatch.setattr(pipe, "enrich_content", lambda urls: {
+        "https://inito.com/en-us": OWNED_CLEAN,
+        "https://fertilitys.com/inito-review": THIRD_STALE,
+    })
+    rows = [{"status": "ok", "intent": "comparison", "stale_product_described": True,
+             "inito_mentioned": True, "inito_recommended": True, "competitor_preferred": None,
+             "sources_cited": json.dumps(["https://inito.com/en-us", "https://fertilitys.com/inito-review"])}]
+    pipe.verify_stale_attribution(rows)
+    verified = json.loads(rows[0]["verified_stale_sources"])
+    assert verified == ["https://fertilitys.com/inito-review"]      # only the review, NOT our page
+    assert rows[0]["priority"] == 2 and "fertilitys.com" in rows[0]["action"]
+    assert "fix our own page" not in rows[0]["action"].lower()
+
+def test_verify_stale_attribution_uses_track_a_history(pipe):
+    # a source already judged stale in Track A history counts as verified for free (no fetch)
     import pandas as pd
-    pd.DataFrame([{"url": "https://leafsnap.com/inito"}]).to_csv(
+    pd.DataFrame([{"url": "https://leafsnap.com/inito", "status": "stale"}]).to_csv(
         pipe.DATA / "observations_history.csv", index=False)
-    rows = [{"stale_product_described": True,
+    rows = [{"status": "ok", "intent": "brand_entity", "stale_product_described": True,
+             "inito_mentioned": True, "inito_recommended": False, "competitor_preferred": None,
              "sources_cited": json.dumps(["https://leafsnap.com/inito"])}]
-    pipe.link_stale_sources(rows)
-    assert rows[0]["stale_source_seen_in_web"] == "https://leafsnap.com/inito"
+    pipe.verify_stale_attribution(rows)
+    assert json.loads(rows[0]["verified_stale_sources"]) == ["https://leafsnap.com/inito"]
+
+def test_verify_cache_only_no_fetch(pipe, monkeypatch):
+    # re-eval mode (fetch_missing=False): verify from the page-text cache, never crawl.
+    pipe.save_fetch_cache({"https://fertilitys.com/inito-review": "It clips onto your phone and uses your camera. iPhone-only."})
+    def boom(*a, **k): raise AssertionError("must not crawl in re-eval mode")
+    monkeypatch.setattr(pipe, "enrich_content", boom)
+    rows = [{"status": "ok", "intent": "comparison", "stale_product_described": True,
+             "inito_mentioned": True, "inito_recommended": True, "competitor_preferred": None,
+             "sources_cited": json.dumps(["https://inito.com/en-us", "https://fertilitys.com/inito-review"])}]
+    pipe.verify_stale_attribution(rows, fetch_missing=False)
+    assert json.loads(rows[0]["verified_stale_sources"]) == ["https://fertilitys.com/inito-review"]
+    assert rows[0]["priority"] == 2 and "fix our own page" not in rows[0]["action"].lower()
+
+def test_reeval_llm_no_requery(pipe, monkeypatch):
+    # the parse/evaluate separation: re-evaluate stored responses with no actor/crawl calls.
+    import pandas as pd
+    pipe.save_fetch_cache({"https://fertilitys.com/inito-review": "It clips onto your phone, uses your camera, iPhone-only."})
+    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt", "prompt": "Inito vs Mira",
+                   "intent": "comparison", "response_text": "Inito uses a phone camera...", "inito_mentioned": True,
+                   "inito_rank": 1, "inito_recommended": True, "stale_product_described": True,
+                   "stale_excerpt": "phone camera", "sources_cited": json.dumps(
+                       ["https://inito.com/en-us", "https://fertilitys.com/inito-review"]),
+                   "sentiment_inito": -0.1, "competitors_named": "[]", "competitor_preferred": None,
+                   "confidence": 0.8, "status": "ok", "error_note": "", "action": "Fix our own page now: https://inito.com/en-us",
+                   "priority": 1}]).to_csv(pipe.DATA / "llm_visibility_history.csv", index=False)
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no re-query")))
+    monkeypatch.setattr(pipe, "enrich_content", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no crawl")))
+    out = pipe.DATA / "reeval_out"; out.mkdir()
+    pipe.reeval_llm(out)
+    df = pd.read_csv(out / "llm_visibility_latest.csv")
+    row = df.iloc[0]
+    assert "fertilitys.com" in row["action"] and "fix our own page" not in row["action"].lower()
+    assert int(row["priority"]) == 2
 
 
 # ---------- selection resolver ----------
