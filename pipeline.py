@@ -9,7 +9,8 @@ Two independent tracks, both driven from the CLI:
     -> classify (regex + Claude judge) -> persist (CSV) -> diff (metrics vs previous run)
 
   Track B — LLM brand visibility (live-web assistants only)
-    discover (ChatGPT + Perplexity web actors, 3 samples per prompt from distinct US IPs)
+    discover (ChatGPT via Apify actor + Perplexity sonar API; `num_runs` samples per prompt×surface,
+    pinned to the US — see docs/DESIGN.md §5.4 on why distinct IPs are not enforced)
     -> classify (Claude judge) -> persist (CSV) -> metrics (Wilson/mean CIs)
 
 Every run writes a self-contained, descriptively-named folder under data/.
@@ -17,10 +18,12 @@ Every run writes a self-contained, descriptively-named folder under data/.
 On-demand:
     python pipeline.py --refresh                 # Track A (interactive source/query select)
     python pipeline.py --llm                      # Track B (interactive surface/prompt select)
-    python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1   # scripted
+    python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1 -y          # scripted
+    python pipeline.py --llm --extra-prompts "Inito vs Oova::comparison" -y            # ad-hoc one-off prompt
+    python pipeline.py --reeval                   # Track B: re-score today's stored responses, no re-query
     python pipeline.py --diff-only                # recompute metrics + diff, no crawling
 
-Env (.env):  APIFY_TOKEN, ANTHROPIC_API_KEY
+Env (.env):  APIFY_TOKEN, ANTHROPIC_API_KEY (+ optional PERPLEXITY_API_KEY for the Perplexity surface)
 """
 
 import argparse, json, os, re, shutil, sys, time, datetime as dt, urllib.request
@@ -77,20 +80,14 @@ def normalize_url(u: str) -> str:
 def domain_of(u: str) -> str:
     return urlsplit(u).netloc.lower().removeprefix("www.")
 
-def run_actor(actor_id: str, run_input: dict, label: str, retries: int = 1) -> list:
-    """Call an actor, return its dataset items. Fail-fast — no sleep between retries."""
-    for attempt in range(1, retries + 1):
-        try:
-            log(f"  actor {actor_id} ({label}) starting…")
-            run = apify.actor(actor_id).call(run_input=run_input)
-            items = list(apify.dataset(run["defaultDatasetId"]).iterate_items())
-            log(f"  actor {actor_id} ({label}) -> {len(items)} items")
-            return items
-        except Exception as e:
-            if attempt == retries:
-                raise
-            log(f"  actor {actor_id} ({label}) attempt {attempt} failed: {e}. Retrying…")
-    return []
+def run_actor(actor_id: str, run_input: dict, label: str) -> list:
+    """Call an actor, return its dataset items. Fail-fast — the caller turns any exception into a
+    visible error row / `_safe_discover` skip, so there is no retry/backoff here (invariant)."""
+    log(f"  actor {actor_id} ({label}) starting…")
+    run = apify.actor(actor_id).call(run_input=run_input)
+    items = list(apify.dataset(run["defaultDatasetId"]).iterate_items())
+    log(f"  actor {actor_id} ({label}) -> {len(items)} items")
+    return items
 
 def _to_bool(series: pd.Series) -> pd.Series:
     """Coerce a CSV-roundtripped column to real booleans (strings like 'True' -> True)."""
@@ -1023,10 +1020,14 @@ def _completed_combos() -> set:
         return set()
 
 
-def discover_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: int) -> List[dict]:
+def discover_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: int,
+                            force: bool = False) -> List[dict]:
     """Run each surface × prompt × run in parallel. Each (surface, run) is one runner call; runs are
-    separate so they sample independently. Resume skips per-(surface, run, prompt) already done today."""
-    completed = _completed_combos()
+    separate so they sample independently. Resume skips per-(surface, run, prompt) already done today
+    (unless force=True, which re-queries everything selected)."""
+    completed = set() if force else _completed_combos()
+    if force:
+        log("  force: ignoring today's resume state — re-querying all selected combos")
     if completed:
         log(f"  resume: {len(completed)} (surface, run, prompt) already done today — skipping those")
     # per (surface, run): only the prompts not yet completed
@@ -1198,10 +1199,11 @@ def compute_llm_metrics(df_all: pd.DataFrame, out_dir: Optional[Path] = None) ->
     return metrics
 
 
-def run_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: int, out_dir: Path):
+def run_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: int, out_dir: Path,
+                       force: bool = False):
     t0 = time.time()
     log(f"LLM VISIBILITY  surfaces={surfaces}  prompts={len(prompts_cfg)}  runs={num_runs}")
-    rows = discover_llm_visibility(surfaces, prompts_cfg, num_runs)
+    rows = discover_llm_visibility(surfaces, prompts_cfg, num_runs, force=force)
     if not rows:
         log("no LLM visibility rows — nothing to do (all combos may already be done today)")
         _cleanup_empty(out_dir)
@@ -1298,6 +1300,26 @@ def _finalize_run(out_dir: Path, track: str, selection: dict, cumulative: List[s
     pd.DataFrame(info).to_csv(out_dir / "run_info.csv", index=False)
 
 
+def parse_extra_prompts(spec: Optional[str]) -> List[dict]:
+    """Parse ad-hoc one-off prompts (not in config) into {'prompt', 'intent'} dicts.
+    Format: ';'-separated entries, each optionally 'text::intent' (intent defaults to 'adhoc').
+    These are run + judged once; they are NOT written to config (the time series stays append-only)."""
+    if not spec or not spec.strip():
+        return []
+    out, seen = [], set()
+    for entry in spec.split(";"):
+        e = entry.strip()
+        if not e:
+            continue
+        text, _, intent = e.partition("::")
+        text, intent = text.strip(), intent.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append({"prompt": text, "intent": intent or "adhoc"})
+    return out
+
+
 def resolve_selection(items: list, spec: Optional[str], label_fn: Callable) -> list:
     """Filter `items` by a spec string: None/'all'/'*' -> all; else comma list of 1-based
     indices and/or (substring) name matches. Raises ValueError on an unmatched token."""
@@ -1353,6 +1375,11 @@ def main(argv=None):
     ap.add_argument("--surfaces", help="Track B surfaces (e.g. 'chatgpt' or 'all')")
     ap.add_argument("--prompts", help="Track B prompts (indices/names, or 'all')")
     ap.add_argument("--num-runs", type=int, help="samples per (prompt × surface); default config")
+    ap.add_argument("--extra-prompts", help="Track B ad-hoc one-off prompts NOT in config; "
+                    "';'-separated, each optionally 'text::intent' (default intent 'adhoc'). "
+                    "Run + judged once; never written to config.")
+    ap.add_argument("--force", action="store_true",
+                    help="Track B: ignore today's resume state and re-query everything selected")
     ap.add_argument("--note", default="", help="short note added to the run-folder name")
     ap.add_argument("-y", "--yes", action="store_true", help="non-interactive: use specs/all, no prompts")
     a = ap.parse_args(argv)
@@ -1367,11 +1394,17 @@ def main(argv=None):
                                  "Surfaces:", a.surfaces, a.yes)
         prompts = prompt_select(CFG["llm_visibility_prompts"], lambda p: p["prompt"],
                                 "Prompts:", a.prompts, a.yes)
+        chosen = {p["prompt"] for p in prompts}
+        extra = [p for p in parse_extra_prompts(a.extra_prompts) if p["prompt"] not in chosen]
+        if extra:
+            log(f"  + {len(extra)} ad-hoc prompt(s) (one-off, not saved to config): "
+                + ", ".join(p["prompt"] for p in extra))
+            prompts = prompts + extra
         num_runs = a.num_runs or CFG.get("llm_num_runs", 3)
         if not surfaces or not prompts:
             sys.exit("nothing selected")
         out_dir = make_run_dir("llm", surfaces, prompts, num_runs, a.note)
-        run_llm_visibility(surfaces, prompts, num_runs, out_dir)
+        run_llm_visibility(surfaces, prompts, num_runs, out_dir, force=a.force)
         return
     if a.refresh:
         sources = prompt_select(WEB_SOURCES, lambda s: s, "Sources:", a.sources, a.yes)

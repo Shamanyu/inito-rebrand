@@ -82,12 +82,18 @@ Run however you want — scope with selectors, or omit them for a multiple-choic
 
 ```bash
 python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1 -y
+python pipeline.py --llm --surfaces chatgpt --extra-prompts "Inito vs Oova::comparison" --num-runs 1 -y
 python pipeline.py --refresh --sources serp,reddit --queries "Inito vs Mira" -y
 ```
 
 - `--surfaces / --prompts / --sources / --queries` — comma-separated **indices or name substrings**, or `all`.
 - `-y / --yes` — non-interactive (use specs / all, no prompts).
 - `--num-runs` — samples per (prompt × surface); default 3 (`config.llm_num_runs`).
+- `--extra-prompts` — Track B ad-hoc **one-off** prompts not in config; `;`-separated, each optionally
+  `text::intent` (default intent `adhoc`). Run + judged once, **never written to config** (the time
+  series stays append-only). Deduped against the selected config prompts.
+- `--force` — Track B: ignore today's resume state and re-query everything selected (for an intentional
+  re-run within the same day).
 - `--note` — short note folded into the run-folder name.
 
 Each run writes a descriptive folder, e.g.

@@ -93,6 +93,7 @@ export $(grep -v '^#' .env | xargs)        # APIFY_TOKEN, ANTHROPIC_API_KEY (+ o
 python pipeline.py --refresh               # Track A; interactive source/query multiple-choice
 python pipeline.py --llm                    # Track B; interactive surface/prompt multiple-choice
 python pipeline.py --llm --surfaces chatgpt --prompts 1,7 --num-runs 1 -y   # scripted, no prompts
+python pipeline.py --llm --surfaces chatgpt --extra-prompts "Inito vs Oova::comparison" -y  # ad-hoc one-off prompt
 python pipeline.py --diff-only             # recompute metrics + diff, no crawling
 python pipeline.py --reeval                # Track B: re-run attribution/action/metrics on today's
                                             #   stored responses only — no re-query, no crawl
@@ -102,7 +103,10 @@ pytest -q                                   # offline tests
 Run scoping: omit `--sources/--queries/--surfaces/--prompts` for an interactive multiple-choice menu;
 pass them (comma-separated indices or name substrings, or `all`) for scripted runs; add `-y` to take
 all/specs without prompting. `--num-runs` overrides samples-per-(prompt×surface). `--note` is folded
-into the run-folder name.
+into the run-folder name. `--extra-prompts` injects Track B **ad-hoc one-off** prompts not in config
+(`;`-separated, each optionally `text::intent`, default intent `adhoc`) — run + judged once, **never
+written to config** (keeps `llm_visibility_prompts` append-only), deduped against the config selection.
+`--force` ignores today's per-(surface, run, prompt) resume state and re-queries everything selected.
 
 ## Skills (`.claude/skills/`)
 

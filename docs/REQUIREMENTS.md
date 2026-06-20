@@ -218,11 +218,13 @@ ownership-aware, and prioritized**, not generic. The action engine must:
 
 | ID | Requirement |
 |---|---|
-| FR-O1 | `--refresh` runs Track A (SERP + News + Reddit). |
-| FR-O2 | `--llm` runs Track B (web-interface assistants) only. |
+| FR-O1 | `--refresh` runs Track A (SERP + News + Ads + Reddit). |
+| FR-O2 | `--llm` runs Track B (live-web assistants) only. |
 | FR-O3 | `--diff-only` recomputes metrics + diff from CSV history, no crawling. |
 | FR-O4 | A combined run option executes both tracks; **both tracks and their internal sources run as parallel as possible** (NFR2). |
 | FR-O5 | Validate required env vars at startup; exit with a clear message if missing. |
+| FR-O6 | `--reeval` re-scores today's already-captured Track B responses (attribution + action + metrics) with no re-query and no crawl. |
+| FR-O7 | Run scoping: `--surfaces` / `--prompts` (indices or name substrings, or `all`), `-y` non-interactive, `--num-runs` samples-per-(prompt×surface). `--extra-prompts` injects ad-hoc **one-off** prompts not in config (`;`-sep, optional `text::intent`, default `adhoc`), never persisted (keeps `llm_visibility_prompts` append-only). `--force` ignores today's resume state. |
 
 ### 5.6 Configuration
 

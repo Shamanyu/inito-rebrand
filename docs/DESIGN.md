@@ -352,10 +352,18 @@ Plus non-actor surfaces: **Perplexity = sonar API** (`limits.perplexity_model`, 
 ```
 python pipeline.py --refresh     # Track A (SERP + News + Ads + Reddit), sources in parallel
 python pipeline.py --llm         # Track B (ChatGPT + Perplexity), surfaces in parallel
+python pipeline.py --reeval      # Track B: re-score today's stored responses, no re-query / crawl
 python pipeline.py --diff-only   # recompute metrics + diff from CSV history, no crawl
 ```
 A combined invocation runs both tracks. **Fix carried from the as-built quirk:** the `--refresh` + LLM
 combination must dispatch both tracks (the old `elif` shadowing is removed in the target design).
+
+**Track B run scoping** (`--llm`): `--surfaces` / `--prompts` select subsets (comma-separated indices
+or name substrings, or `all`); `-y` takes the specs/all non-interactively; `--num-runs` overrides
+samples-per-(prompt×surface). `--extra-prompts` injects **ad-hoc one-off** prompts not in config
+(`;`-separated, each optionally `text::intent`, default intent `adhoc`) — run + judged once, **never
+written to `config.json`** (keeps `llm_visibility_prompts` append-only), deduped against the config
+selection. `--force` ignores today's per-`(surface, run, prompt)` resume state and re-queries everything.
 
 ## 13. Testing Strategy
 
@@ -365,9 +373,11 @@ combination must dispatch both tracks (the old `elif` shadowing is removed in th
 - Coverage to maintain/extend: URL normalization, ownership (incl. app-store/Amazon + **ads landing-page**),
   claim detection (incl. the two guarded regressions and **new not-stale false-positive cases** — hormones,
   companion app, dip-strip), SERP + **ads** parsing, CSV fetch cache, review queue, kappa, metrics + two-run
-  decay diff, share of voice, Track B discovery/persist/metrics, and the **action engine + cross-track linkage**.
-- **Rule:** changing `detect_claims`, `ownership`, discovery parsing, the action engine, or metrics math
-  requires extending tests.
+  decay diff, share of voice, Track B discovery/persist/metrics, the **action engine + quote-grounded
+  attribution**, the selection resolver + **ad-hoc `--extra-prompts`** parsing/merge/dedupe, and
+  **resume / `--force`** behavior.
+- **Rule:** changing `detect_claims`, `ownership`, discovery parsing, the action engine, the selection
+  resolver, or metrics math requires extending tests.
 
 ## 14. Deployment / Productionization
 

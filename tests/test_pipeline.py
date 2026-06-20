@@ -480,6 +480,63 @@ def test_resolve_selection_errors(pipe):
         pipe.resolve_selection(items, "zzz", lambda s: s)
 
 
+# ---------- ad-hoc one-off prompts (--extra-prompts) ----------
+def test_parse_extra_prompts_empty(pipe):
+    assert pipe.parse_extra_prompts(None) == []
+    assert pipe.parse_extra_prompts("") == []
+    assert pipe.parse_extra_prompts("  ;  ; ") == []
+
+def test_parse_extra_prompts_default_intent(pipe):
+    assert pipe.parse_extra_prompts("Inito vs Oova") == [
+        {"prompt": "Inito vs Oova", "intent": "adhoc"}]
+
+def test_parse_extra_prompts_explicit_intent_and_separation(pipe):
+    out = pipe.parse_extra_prompts("Inito vs Oova::comparison; Is Inito legit?::purchase")
+    assert out == [
+        {"prompt": "Inito vs Oova", "intent": "comparison"},
+        {"prompt": "Is Inito legit?", "intent": "purchase"}]
+
+def test_parse_extra_prompts_dedupes_within_spec(pipe):
+    out = pipe.parse_extra_prompts("Inito vs Oova; Inito vs Oova::comparison")
+    assert out == [{"prompt": "Inito vs Oova", "intent": "adhoc"}]
+
+
+# ---------- --force resume bypass ----------
+def test_force_bypasses_resume(pipe, monkeypatch):
+    import pandas as pd
+    # mark the only prompt as already completed today
+    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt",
+                   "prompt": "Inito", "inito_mentioned": True}]).to_csv(
+        pipe.DATA / "llm_visibility_history.csv", index=False)
+    monkeypatch.setattr(pipe, "run_actor",
+                        lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
+    prompts = [{"prompt": "Inito", "intent": "brand_entity"}]
+    # default (resume on) -> skipped; force=True -> re-queried
+    assert pipe.discover_llm_visibility(["chatgpt"], prompts, 1) == []
+    forced = pipe.discover_llm_visibility(["chatgpt"], prompts, 1, force=True)
+    assert [r["prompt"] for r in forced] == ["Inito"]
+
+
+# ---------- --extra-prompts end-to-end via the CLI ----------
+def test_cli_extra_prompts_runs_adhoc_and_dedupes(pipe, monkeypatch):
+    import pandas as pd
+    sent = []
+    def fake_actor(actor_id, run_input, label):
+        sent.extend(run_input.get("prompts", []))
+        return [{"prompt": p, "response": "Inito is great. Worth it.", "citations": []}
+                for p in run_input["prompts"]]
+    monkeypatch.setattr(pipe, "run_actor", fake_actor)
+    # config prompt 1 ("Inito") + one ad-hoc + a dup of prompt 1 that must be dropped
+    pipe.main(["--llm", "--surfaces", "chatgpt", "--prompts", "1",
+               "--extra-prompts", "Inito vs Oova::comparison; Inito", "--num-runs", "1", "-y"])
+    hist = pd.read_csv(pipe.DATA / "llm_visibility_history.csv")
+    prompts_run = sorted(hist["prompt"].unique().tolist())
+    assert prompts_run == ["Inito", "Inito vs Oova"]            # dup "Inito" deduped, ad-hoc included
+    assert sent.count("Inito") == 1                              # the duplicate was not sent twice
+    adhoc = hist[hist["prompt"] == "Inito vs Oova"].iloc[0]
+    assert adhoc["intent"] == "comparison" and adhoc["status"] == "ok"
+
+
 # ---------- run folder naming ----------
 def test_run_dir_name_is_descriptive(pipe):
     name = pipe.run_dir_name("2026-06-20T143005", "llm", ["chatgpt", "perplexity"], 7,
