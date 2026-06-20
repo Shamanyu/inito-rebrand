@@ -326,11 +326,11 @@ appears in the citation list.
 
 ## 11. Configuration Design (`config.json`)
 
-Sections: `market`; `queries` (frozen+intent, append-only); `reddit_searches`; `llm_visibility_prompts`
-(frozen+intent); `llm_surfaces` (was `llm_models`) + sampling/proxy knobs (**`llm_num_runs = 3`**,
-`llm_proxy_group = "DATACENTER"`, `proxy_country = "US"`); `claim_patterns` +
-`current_signal_patterns` + `price_pattern`; `owned_domains`/`owned_app_ids`/`competitor_domains`;
-`actors` (slugs); `limits` (caps + `judge_model`).
+Sections: `market`; **`topics`** (unified web+llm catalog, append-only, `id`/`intent`/`web`/`llm` — read
+via `web_topics()`/`llm_topics()`; replaces the old split `queries` + `llm_visibility_prompts`);
+`reddit_searches`; `ads_start_urls`; `llm_surfaces` + sampling knobs (`llm_num_runs = 3`,
+`proxy_country = "US"`); `claim_patterns` + `current_signal_patterns` + `price_pattern`;
+`owned_domains`/`owned_app_ids`/`competitor_domains`; `actors` (slugs); `limits` (caps + `judge_model`).
 
 **Confirmed `actors` set:**
 ```
@@ -344,7 +344,7 @@ Plus non-actor surfaces: **Perplexity = sonar API** (`limits.perplexity_model`, 
 **Deleted from config:** `bing`, `instagram`, `twitter`, `youtube`, `tiktok`, `llm_runner`,
 `google_ai_mode`, the `perplexity` actor slug, `llm_proxy_group`, `perplexity_wait_timeout`.
 
-**Invariants:** queries/prompts append-only; judge model id only in `limits.judge_model`
+**Invariants:** `topics` append-only (both surfaces in one entry, joined by `id`); judge model id only in `limits.judge_model`
 (`claude-sonnet-4-6`); add regex to improve recall, never make regex the final arbiter.
 
 ## 12. CLI / Orchestration Design
@@ -362,7 +362,7 @@ combination must dispatch both tracks (the old `elif` shadowing is removed in th
 or name substrings, or `all`); `-y` takes the specs/all non-interactively; `--num-runs` overrides
 samples-per-(prompt×surface). `--extra-prompts` injects **ad-hoc one-off** prompts not in config
 (`;`-separated, each optionally `text::intent`, default intent `adhoc`) — run + judged once, **never
-written to `config.json`** (keeps `llm_visibility_prompts` append-only), deduped against the config
+written to `config.json`** (keeps `topics` append-only), deduped against the config
 selection. `--force` ignores today's per-`(surface, run, prompt)` resume state and re-queries everything.
 
 ## 13. Testing Strategy

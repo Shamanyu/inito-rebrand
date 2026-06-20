@@ -180,7 +180,7 @@ via an actor or an always-live-search API (sonar) — the rule is no training-da
 
 | ID | Requirement |
 |---|---|
-| FR-B1 | Send every prompt in `llm_visibility_prompts` to every configured surface (`config.llm_surfaces`). |
+| FR-B1 | Send every topic's `llm` phrasing (`config.topics` via `llm_topics()`) to every configured surface (`config.llm_surfaces`). |
 | FR-B2 | For **every (prompt × surface), issue 3 samples** (`num_runs = 3`), run in parallel; pool for Wilson/mean CIs (FR-B9). |
 | FR-B2a | **US pinning / IP variance:** ChatGPT pins US via the actor's `country` field; Perplexity (sonar API) has no IP control. The original "3 distinct US IPs" goal is **aspirational, not enforced** (an actor's `proxyConfiguration` object can't set a per-run session, and the account had no DATACENTER proxy). The 3 samples primarily capture **model variance**. Revisit if a per-surface IP guarantee becomes a hard requirement. |
 | FR-B3 | Resume: skip **(surface, run_index, prompt)** combos already completed today (per-prompt, so a partial run doesn't block the rest). |
@@ -224,7 +224,7 @@ ownership-aware, and prioritized**, not generic. The action engine must:
 | FR-O4 | A combined run option executes both tracks; **both tracks and their internal sources run as parallel as possible** (NFR2). |
 | FR-O5 | Validate required env vars at startup; exit with a clear message if missing. |
 | FR-O6 | `--reeval` re-scores today's already-captured Track B responses (attribution + action + metrics) with no re-query and no crawl. |
-| FR-O7 | Run scoping: `--surfaces` / `--prompts` (indices or name substrings, or `all`), `-y` non-interactive, `--num-runs` samples-per-(prompt×surface). `--extra-prompts` injects ad-hoc **one-off** prompts not in config (`;`-sep, optional `text::intent`, default `adhoc`), never persisted (keeps `llm_visibility_prompts` append-only). `--force` ignores today's resume state. |
+| FR-O7 | Run scoping: `--surfaces` / `--prompts` (indices or name substrings, or `all`), `-y` non-interactive, `--num-runs` samples-per-(prompt×surface). `--extra-prompts` injects ad-hoc **one-off** prompts not in config (`;`-sep, optional `text::intent`, default `adhoc`), never persisted (keeps `topics` append-only). `--force` ignores today's resume state. |
 
 ### 5.6 Configuration
 
@@ -232,7 +232,7 @@ ownership-aware, and prioritized**, not generic. The action engine must:
 |---|---|
 | FR-C1 | All queries, prompts, claim regexes, domain lists, actor slugs, model ids, and limits live in `config.json`. |
 | FR-C2 | The judge model id lives only in `config.limits.judge_model`. |
-| FR-C3 | `queries` and `llm_visibility_prompts` are **append-only** (frozen + intent) to preserve the time series. |
+| FR-C3 | A single **`topics`** catalog is the source of truth for **both tracks** — each entry has a stable `id` (cross-surface join key), `intent`, a `web` phrasing (Track A) and an `llm` phrasing (Track B). It is **append-only** (never edit an existing `web`/`llm`/`id`) to preserve the time series + resume. Web and LLM run the **same topic set**, each in its native idiom; rows carry `topic_id` so surfaces are joinable. |
 | FR-C4 | Removed actors (Bing, IG, X, YouTube, TikTok, bulk-llm-runner, the Gemini/Google-AI-Mode actors) must be deleted from config, not left dormant. |
 
 ## 6. Non-Functional Requirements

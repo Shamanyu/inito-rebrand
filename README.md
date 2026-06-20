@@ -45,7 +45,7 @@ page. The `action` column says what to do (fix our page, outrank a source, build
 ## Repo layout
 
 ```
-config.json     control surface — queries, ads_start_urls, llm_visibility_prompts, llm_surfaces,
+config.json     control surface — topics (unified web+llm catalog), ads_start_urls, llm_surfaces,
                 claim regexes, domain lists, actor slugs, limits
 pipeline.py     orchestrator (both tracks) + CLI with interactive multiple-choice selection
 docs/           REQUIREMENTS.md + DESIGN.md
@@ -103,7 +103,7 @@ CSVs plus a `run_info.csv`. Cumulative history + time series live at the `data/`
 ## Config
 
 `config.json` is the control surface and is git-versioned on purpose:
-- **queries / llm_visibility_prompts** — frozen + intent. Never edit an existing entry (breaks the series); add a new one.
+- **topics** — one unified catalog for BOTH tracks: each has `id` (cross-surface join key), `intent`, a `web` phrasing (Google) and an `llm` phrasing (ChatGPT/Perplexity). Append-only: never edit an existing `web`/`llm`/`id` (breaks the series); add a new topic. Read in code via `web_topics()` / `llm_topics()`.
 - **ads_start_urls** — Google Ads Transparency Center URLs (advertiser/domain).
 - **claim_patterns** — regex heuristics; the judge resolves ambiguity. Add patterns for new phrasings (never for shared attributes like hormones/app).
 - **owned/competitor_domains** — drive the ownership column and the `owned_stale` metric.

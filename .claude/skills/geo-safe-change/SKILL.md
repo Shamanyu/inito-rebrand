@@ -21,8 +21,10 @@ decision hinges on **old (phone-dependent) vs current (InSight Wireless Reader)*
 
 ## Hard invariants — do not break
 
-1. **`config.json` `queries` and `llm_visibility_prompts` are append-only.** Editing an existing
-   string silently breaks the time series. Add a new entry; never edit/delete an old one.
+1. **`config.json` `topics` is append-only.** One unified catalog feeds BOTH tracks — each entry has a
+   stable `id` (cross-surface join key), `intent`, `web` phrasing (Track A) and `llm` phrasing (Track B).
+   Editing an existing `web`/`llm` string or `id` silently breaks the time series + resume. Add a new
+   topic; never edit/delete an old one. Read via `web_topics()` / `llm_topics()`.
 2. **The LLM judge is the arbiter of `status`/visibility, not regex.** `claim_patterns` are a
    cheap pre-filter + offline fallback. Improve recall by adding patterns — never make regex the
    final call.

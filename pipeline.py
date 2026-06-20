@@ -47,6 +47,18 @@ _WEB_PLATFORMS = {"web", "news", "ads", "reddit"}
 WEB_SOURCES = ["serp", "news", "ads", "reddit"]
 
 
+# ---- unified topic catalog: both tracks run the SAME topics, each in its native phrasing ----
+def web_topics() -> List[dict]:
+    """Track A view of config.topics: [{q, intent, id}] (surface-native Google phrasing)."""
+    return [{"q": t["web"], "intent": t["intent"], "id": t["id"]}
+            for t in CFG["topics"] if t.get("web")]
+
+def llm_topics() -> List[dict]:
+    """Track B view of config.topics: [{prompt, intent, id}] (surface-native conversational phrasing)."""
+    return [{"prompt": t["llm"], "intent": t["intent"], "id": t["id"]}
+            for t in CFG["topics"] if t.get("llm")]
+
+
 # ---------- startup validation ----------
 def _require_env(*names):
     missing = [n for n in names if not os.environ.get(n)]
@@ -117,8 +129,9 @@ def discover_serp(queries: Optional[List[dict]] = None) -> List[dict]:
     """Google SERP via apify/google-search-scraper.
     Captures organic results, AI Overview, and ChatGPT/Perplexity SERP panels.
     """
-    qcfg = queries or CFG["queries"]
+    qcfg = queries or web_topics()
     qmap = {c["q"]: c["intent"] for c in qcfg}
+    idmap = {c["q"]: c.get("id", "") for c in qcfg}
     run_input = {
         "queries": "\n".join(qmap.keys()),
         "resultsPerPage": CFG["limits"]["serp_results_per_query"],
@@ -131,39 +144,40 @@ def discover_serp(queries: Optional[List[dict]] = None) -> List[dict]:
     for item in run_actor(CFG["actors"]["serp"], run_input, "serp"):
         sq = item.get("searchQuery")
         q = (sq.get("term") if isinstance(sq, dict) else sq) or ""
-        intent = qmap.get(q, "unknown")
+        intent = qmap.get(q, "unknown"); tid = idmap.get(q, "")
         for rank, r in enumerate(item.get("organicResults", []), 1):
             url = r.get("url")
             if not url:
                 continue
-            out.append({"url": url, "platform": "web", "query": q, "intent": intent,
+            out.append({"url": url, "platform": "web", "query": q, "intent": intent, "topic_id": tid,
                         "rank": rank, "title": r.get("title", ""), "snippet": r.get("description", "")})
         # Google AI Overview (Gemini-powered) — passive capture, stored as a pseudo-URL
         ai = item.get("aiOverview") or item.get("aiOverviewText")
         if ai:
             out.append({"url": f"aioverview::{q}", "platform": "ai_overview", "query": q,
-                        "intent": intent, "rank": 0, "title": "Google AI Overview",
+                        "intent": intent, "topic_id": tid, "rank": 0, "title": "Google AI Overview",
                         "snippet": ai if isinstance(ai, str) else json.dumps(ai)[:4000]})
         # ChatGPT / Perplexity SERP panels (appear on some Google plans)
         for cgpt in (item.get("chatGptSearchResults") or []):
             text = cgpt.get("text") or cgpt.get("answer") or ""
             if text:
                 out.append({"url": f"chatgptsearch::{q}", "platform": "chatgpt_search", "query": q,
-                            "intent": intent, "rank": 0, "title": "ChatGPT Search Panel",
+                            "intent": intent, "topic_id": tid, "rank": 0, "title": "ChatGPT Search Panel",
                             "snippet": text[:4000]})
         for px in (item.get("perplexitySearchResults") or []):
             text = px.get("text") or px.get("answer") or ""
             if text:
                 out.append({"url": f"perplexitysearch::{q}", "platform": "perplexity_search", "query": q,
-                            "intent": intent, "rank": 0, "title": "Perplexity Search Panel",
+                            "intent": intent, "topic_id": tid, "rank": 0, "title": "Perplexity Search Panel",
                             "snippet": text[:4000]})
     return out
 
 
 def discover_news(queries: Optional[List[dict]] = None) -> List[dict]:
     """Google News via the same SERP actor with tbm=nws — press/syndicated stale content."""
-    qcfg = queries or CFG["queries"]
+    qcfg = queries or web_topics()
     qmap = {c["q"]: c["intent"] for c in qcfg}
+    idmap = {c["q"]: c.get("id", "") for c in qcfg}
     run_input = {
         "queries": "\n".join(qmap.keys()),
         "resultsPerPage": CFG["limits"].get("news_max_per_query", 20),
@@ -182,7 +196,7 @@ def discover_news(queries: Optional[List[dict]] = None) -> List[dict]:
             url = r.get("url")
             if url:
                 out.append({"url": url, "platform": "news", "query": q, "intent": intent,
-                            "rank": rank, "title": r.get("title", ""),
+                            "topic_id": idmap.get(q, ""), "rank": rank, "title": r.get("title", ""),
                             "snippet": r.get("description", "")})
     return out
 
@@ -651,8 +665,8 @@ def refresh(sources: List[str], queries: List[dict], out_dir: Path):
         cc = verdict.get("claims_confirmed", {})
         rows.append({
             "url": r["url"], "domain": domain_of(r["url"]), "platform": r["platform"],
-            "query": r["query"], "intent": r["intent"], "rank": r["rank"],
-            "advertiser": r.get("advertiser", ""),
+            "query": r["query"], "intent": r["intent"], "topic_id": r.get("topic_id", ""),
+            "rank": r["rank"], "advertiser": r.get("advertiser", ""),
             "ownership": r.get("ownership") or ownership(r["url"]),
             "status": verdict.get("status"),
             "current_product_named": verdict.get("current_product_named"),
@@ -777,26 +791,27 @@ def _mean_ci(values: list, z: float = 1.96):
     return round(mu, 3), round(mu - z * se, 3), round(mu + z * se, 3)
 
 
-def _empty_row(run_idx, surface, prompt, intent, note: str) -> dict:
+def _empty_row(run_idx, surface, prompt, intent, note: str, topic_id: str = "") -> dict:
     """A response with no usable text (actor nav/anti-bot failure) — never judged, flagged in the sheet."""
     row = {"run_date": RUN_DATE, "run_index": run_idx, "surface": surface, "prompt": prompt,
-           "intent": intent, "response_text": "", "inito_mentioned": None, "inito_rank": None,
-           "inito_recommended": None, "stale_product_described": None, "stale_excerpt": None,
-           "sources_cited": "[]", "sentiment_inito": None, "competitors_named": "[]",
-           "competitor_preferred": None, "confidence": None, "status": "empty", "error_note": note}
+           "intent": intent, "topic_id": topic_id, "response_text": "", "inito_mentioned": None,
+           "inito_rank": None, "inito_recommended": None, "stale_product_described": None,
+           "stale_excerpt": None, "sources_cited": "[]", "sentiment_inito": None,
+           "competitors_named": "[]", "competitor_preferred": None, "confidence": None,
+           "status": "empty", "error_note": note}
     row["action"] = f"Empty response — {note} (no judgement; fix the actor/surface)"
     row["priority"] = 6
     return row
 
 
 def _llm_row(run_idx, surface, prompt, intent, response_text, extra_sources=None,
-             priors=None) -> dict:
+             priors=None, topic_id: str = "") -> dict:
     """Judge one assistant response and build a visibility row (with action + priority).
     An empty/blank response is NOT judged — it means the actor returned nothing (e.g. nav timeout),
     and judging it fabricates signals."""
     if not (response_text or "").strip():
         return _empty_row(run_idx, surface, prompt, intent,
-                          "actor returned no answer text (navigation/anti-bot failure)")
+                          "actor returned no answer text (navigation/anti-bot failure)", topic_id)
     verdict = judge_llm_response(prompt, surface, response_text)
     priors = priors or {}
     judge_sources = verdict.get("sources_cited") or []
@@ -804,7 +819,7 @@ def _llm_row(run_idx, surface, prompt, intent, response_text, extra_sources=None
     all_sources = list(dict.fromkeys(judge_sources + (extra_sources or []) + inline))[:15]
     row = {
         "run_date": RUN_DATE, "run_index": run_idx, "surface": surface,
-        "prompt": prompt, "intent": intent, "response_text": response_text[:4000],
+        "prompt": prompt, "intent": intent, "topic_id": topic_id, "response_text": response_text[:4000],
         "inito_mentioned": verdict.get("inito_mentioned", priors.get("mentioned") or False),
         "inito_rank": verdict.get("inito_rank", priors.get("position")),
         "inito_recommended": verdict.get("inito_recommended", False),
@@ -828,7 +843,8 @@ def _error_rows(run_idx, surface, prompts_cfg, err: str) -> List[dict]:
     out = []
     for p in prompts_cfg:
         row = {"run_date": RUN_DATE, "run_index": run_idx, "surface": surface,
-               "prompt": p["prompt"], "intent": p["intent"], "response_text": None,
+               "prompt": p["prompt"], "intent": p["intent"], "topic_id": p.get("id", ""),
+               "response_text": None,
                "inito_mentioned": None, "inito_rank": None, "inito_recommended": None,
                "stale_product_described": None, "stale_excerpt": None, "sources_cited": "[]",
                "sentiment_inito": None, "competitors_named": "[]", "competitor_preferred": None,
@@ -842,6 +858,7 @@ def _error_rows(run_idx, surface, prompts_cfg, err: str) -> List[dict]:
 def _run_chatgpt(run_idx: int, prompts_cfg: List[dict]) -> List[dict]:
     """tri_angle/gpt-search — live ChatGPT search. country pins US; this run draws a fresh US session."""
     intent_map = {p["prompt"]: p["intent"] for p in prompts_cfg}
+    id_map = {p["prompt"]: p.get("id", "") for p in prompts_cfg}
     run_input = {"prompts": [p["prompt"] for p in prompts_cfg],
                  "country": CFG.get("proxy_country", "US")}
     try:
@@ -856,7 +873,7 @@ def _run_chatgpt(run_idx: int, prompts_cfg: List[dict]) -> List[dict]:
         response = it.get("response") or ""
         cites = [c.get("url", "") for c in (it.get("citations") or []) if c.get("url")]
         rows.append(_llm_row(run_idx, "chatgpt", prompt, intent_map.get(prompt, "unknown"),
-                             response, extra_sources=cites))
+                             response, extra_sources=cites, topic_id=id_map.get(prompt, "")))
     return rows
 
 
@@ -873,7 +890,7 @@ def _run_perplexity(run_idx: int, prompts_cfg: List[dict]) -> List[dict]:
         try:
             answer, sources = perplexity_complete(p["prompt"], model)
             rows.append(_llm_row(run_idx, "perplexity", p["prompt"], p["intent"],
-                                 answer, extra_sources=sources))
+                                 answer, extra_sources=sources, topic_id=p.get("id", "")))
         except Exception as e:
             rows.append(_error_rows(run_idx, "perplexity", [p], e)[0])  # fail-fast, per-prompt
     return rows
@@ -1086,7 +1103,7 @@ def export_llm_csv(rows: List[dict], out_dir: Path) -> None:
         "competitors_named": "competitors_mentioned", "verified_stale_sources": "verified_stale_source",
     }
     df = df.rename(columns=col_map)
-    ordered = ["date", "surface", "prompt", "intent", "priority", "action",
+    ordered = ["date", "surface", "topic_id", "prompt", "intent", "priority", "action",
                "mentioned", "rank_in_response", "recommended", "sentiment (-1 to +1)",
                "stale_claim", "stale_quote", "verified_stale_source",
                "competitors_mentioned", "competitor_preferred", "sources (clickable URLs)",
@@ -1392,7 +1409,7 @@ def main(argv=None):
     if a.llm:
         surfaces = prompt_select(CFG["llm_surfaces"], lambda s: s,
                                  "Surfaces:", a.surfaces, a.yes)
-        prompts = prompt_select(CFG["llm_visibility_prompts"], lambda p: p["prompt"],
+        prompts = prompt_select(llm_topics(), lambda p: p["prompt"],
                                 "Prompts:", a.prompts, a.yes)
         chosen = {p["prompt"] for p in prompts}
         extra = [p for p in parse_extra_prompts(a.extra_prompts) if p["prompt"] not in chosen]
@@ -1408,7 +1425,7 @@ def main(argv=None):
         return
     if a.refresh:
         sources = prompt_select(WEB_SOURCES, lambda s: s, "Sources:", a.sources, a.yes)
-        queries = prompt_select(CFG["queries"], lambda q: q["q"], "Queries:", a.queries, a.yes)
+        queries = prompt_select(web_topics(), lambda q: q["q"], "Queries:", a.queries, a.yes)
         if not sources or not queries:
             sys.exit("nothing selected")
         out_dir = make_run_dir("web", sources, queries, note=a.note)

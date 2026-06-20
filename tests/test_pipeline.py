@@ -537,6 +537,38 @@ def test_cli_extra_prompts_runs_adhoc_and_dedupes(pipe, monkeypatch):
     assert adhoc["intent"] == "comparison" and adhoc["status"] == "ok"
 
 
+# ---------- unified topic catalog ----------
+def test_topics_full_parity_same_set_both_tracks(pipe):
+    topics = pipe.CFG["topics"]
+    web, llm = pipe.web_topics(), pipe.llm_topics()
+    # the whole point: BOTH tracks run the SAME set of topics (joinable by id)
+    assert len(web) == len(llm) == len(topics)
+    assert {t["id"] for t in web} == {t["id"] for t in llm} == {t["id"] for t in topics}
+
+def test_topics_preserve_legacy_strings(pipe):
+    # append-only: every pre-existing query/prompt string must still be present verbatim
+    webs = {t["q"] for t in pipe.web_topics()}
+    llms = {t["prompt"] for t in pipe.llm_topics()}
+    for s in ("Inito fertility monitor", "Inito iPhone only", "best at-home fertility monitor",
+              "Inito vs Mira", "is Inito legit"):
+        assert s in webs, s
+    for s in ("Inito", "Inito reviews", "Does Inito work on Android?", "Is Inito worth it?",
+              "Inito vs Kegg"):
+        assert s in llms, s
+
+def test_topic_id_threaded_web(pipe, monkeypatch):
+    fake = [{"searchQuery": {"term": "Inito vs Mira"},
+             "organicResults": [{"url": "https://miracare.com/x", "title": "t", "description": "d"}]}]
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake)
+    rows = pipe.discover_serp()
+    assert rows[0]["topic_id"] == "cmp_mira"   # web string → its catalog id
+
+def test_topic_id_threaded_llm(pipe, monkeypatch):
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
+    rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity", "id": "brand_head"}], 1)
+    assert rows[0]["topic_id"] == "brand_head"
+
+
 # ---------- run folder naming ----------
 def test_run_dir_name_is_descriptive(pipe):
     name = pipe.run_dir_name("2026-06-20T143005", "llm", ["chatgpt", "perplexity"], 7,

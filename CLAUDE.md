@@ -73,7 +73,7 @@ actor. History in git if needed.
 ## Repo layout
 
 ```
-config.json     control surface (queries, ads_start_urls, llm_visibility_prompts, llm_surfaces,
+config.json     control surface (topics [unified web+llm catalog], ads_start_urls, llm_surfaces,
                 claim regexes, domain lists, actor slugs, limits)
 pipeline.py     orchestrator (both tracks) + CLI with interactive selection
 docs/           REQUIREMENTS.md + DESIGN.md (source of truth for scope/design)
@@ -105,7 +105,7 @@ pass them (comma-separated indices or name substrings, or `all`) for scripted ru
 all/specs without prompting. `--num-runs` overrides samples-per-(prompt×surface). `--note` is folded
 into the run-folder name. `--extra-prompts` injects Track B **ad-hoc one-off** prompts not in config
 (`;`-separated, each optionally `text::intent`, default intent `adhoc`) — run + judged once, **never
-written to config** (keeps `llm_visibility_prompts` append-only), deduped against the config selection.
+written to config** (keeps `topics` append-only), deduped against the config selection.
 `--force` ignores today's per-(surface, run, prompt) resume state and re-queries everything selected.
 
 ## Skills (`.claude/skills/`)
@@ -120,7 +120,9 @@ Workflow skills encode the conventions below so feature work stays safe and fast
 
 ## Invariants — do not break these
 
-- **`config.json` queries + llm_visibility_prompts are append-only.** Editing an existing string
+- **`config.json` `topics` are append-only.** One unified catalog drives BOTH tracks — each topic has a
+  stable `id` (cross-surface join key), `intent`, `web` phrasing (Track A), and `llm` phrasing (Track B).
+  Editing an existing `web`/`llm` string or `id`
   silently breaks the time series. Add a new entry and leave the old one.
 - **The LLM judge is the arbiter of `status`, not regex.** `claim_patterns` are cheap heuristics that
   feed the judge and serve as the offline fallback. Improve recall by adding patterns; never rely on
