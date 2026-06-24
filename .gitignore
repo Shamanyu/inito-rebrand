@@ -1,7 +1,7 @@
 .env
-# ignore everything under data/ (snapshots, history, per-run folders) except the placeholder
-data/*
-!data/.gitkeep
+# data/ run outputs ARE tracked (committed each run as an audit trail).
+# Keep the transient fetch cache out — it's a large, churny cost cache, not a deliverable.
+data/fetch_cache.csv
 __pycache__/
 *.pyc
 .venv/
