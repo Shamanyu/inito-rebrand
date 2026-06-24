@@ -66,14 +66,37 @@ def test_is_nonprod_owned(pipe, url, expected):
 
 
 # ---------- links + competitor detection ----------
-def test_extract_links_dedupes_normalises_and_excludes_self(pipe):
+def test_extract_links_external_only_dedupes_normalises(pipe):
     text = ("See https://miracare.com/x?utm_source=a and https://proovtest.com/y "
-            "and https://miracare.com/x again, plus https://inito.com/self.")
+            "and https://miracare.com/x again, plus https://inito.com/self and https://inito.com/other.")
     links = pipe.extract_links(text, exclude_url="https://inito.com/self")
-    assert "https://miracare.com/x" in links
+    assert "https://miracare.com/x" in links               # external links kept (tracking stripped)
     assert "https://proovtest.com/y" in links
-    assert "https://inito.com/self" not in links          # the page's own URL is excluded
-    assert links.count("https://miracare.com/x") == 1      # deduped after normalisation
+    assert "https://inito.com/self" not in links            # the page's own URL dropped
+    assert "https://inito.com/other" not in links           # same-host internal link dropped too
+    assert links.count("https://miracare.com/x") == 1       # deduped after normalisation
+
+def test_extract_links_drops_assets_and_trackers(pipe):
+    text = ("Editorial: https://tempdrop.com and affiliate https://mira-fertility.pxf.io/nXxG49 . "
+            "Asset noise: https://cdn.shopify.com/s/files/IMG_2543_600x600.jpg "
+            "https://redditstatic.com/avatars/v2/avatar_default_4.png "
+            "https://fls-na.amazon.com/1/oc-csi/1/OP/requestId=ABC "
+            "https://tpc.googlesyndication.com/daca_images/simgad/8513377064794289515")
+    links = pipe.extract_links(text, exclude_url="https://review.com/inito")
+    assert "https://tempdrop.com" in links and "https://mira-fertility.pxf.io/nXxG49" in links
+    assert all("shopify" not in l and "redditstatic" not in l and "fls-na.amazon" not in l
+               and "googlesyndication" not in l for l in links)   # images/trackers dropped
+
+def test_enrich_prefers_markdown_so_links_survive(pipe, monkeypatch):
+    # regression: storing the crawler's plain `text` stripped links -> links_on_source was empty.
+    # Prefer markdown so [text](url) links are captured.
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: [
+        {"url": "https://rev.com/inito", "text": "plain text with no links at all",
+         "markdown": "Inito review. See [buy](https://inito.com/buy) and [Mira](https://miracare.com/x)."}])
+    body = pipe.enrich_content(["https://rev.com/inito"])["https://rev.com/inito"]
+    assert "https://inito.com/buy" in body                  # markdown kept, not the link-stripped text
+    links = pipe.extract_links(body, "https://rev.com/inito")
+    assert "https://inito.com/buy" in links and "https://miracare.com/x" in links
 
 def test_competitors_in(pipe):
     assert set(pipe._competitors_in(COMPETE_TEXT)) >= {"Mira", "Proov"}

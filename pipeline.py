@@ -126,13 +126,29 @@ def run_actor(actor_id: str, run_input: dict, label: str) -> list:
 def _extract_urls(text: str) -> List[str]:
     return re.findall(r'https?://[^\s\)\]\"\'>,]+', text or "")
 
+# assets/trackers that aren't "links the source points readers to" — filtered from links_on_source.
+_ASSET_EXT = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico", ".css", ".js",
+              ".woff", ".woff2", ".ttf", ".mp4", ".mov", ".webm", ".mp3")
+_ASSET_HOSTS = ("gstatic.com", "googlesyndication.com", "doubleclick.net", "google-analytics.com",
+                "googletagmanager.com", "fls-na.amazon.com", "redditstatic.com")
+
+def _is_asset_link(url: str) -> bool:
+    s = urlsplit(url)
+    if any(s.path.lower().endswith(e) for e in _ASSET_EXT):
+        return True
+    host = s.netloc.lower()
+    return any(h in host for h in _ASSET_HOSTS)
+
 def extract_links(text: str, exclude_url: str = "") -> List[str]:
-    """Outbound links mentioned on a page, canonicalised + deduped, excluding the page's own URL."""
-    ex = normalize_url(exclude_url)
+    """Outbound (external) links a page points readers to — canonicalised + deduped. Drops links on the
+    page's own host (self / internal nav) and image/asset/tracking URLs, so the list captures real
+    destinations (retailers, competitors, citations, affiliate links). Needs the crawler's MARKDOWN
+    body to find anything (plain text strips links)."""
+    page_host = domain_of(exclude_url) if exclude_url else ""
     out, seen = [], set()
     for u in _extract_urls(text):
         n = normalize_url(u)
-        if not n or n == ex or n in seen:
+        if not n or n in seen or domain_of(n) == page_host or _is_asset_link(n):
             continue
         seen.add(n); out.append(n)
     return out[:20]
@@ -367,7 +383,9 @@ def enrich_content(urls: List[str]) -> Dict[str, str]:
     for it in run_actor(CFG["actors"]["content"], run_input, "content"):
         u = it.get("url")
         if u:
-            fetched[normalize_url(u)] = (it.get("text") or it.get("markdown") or "")[:20000]
+            # prefer markdown: the crawler strips boilerplate either way, but markdown keeps the
+            # [text](url) links so `links_on_source` can be populated; plain text drops them.
+            fetched[normalize_url(u)] = (it.get("markdown") or it.get("text") or "")[:20000]
     save_fetch_cache(fetched)
     return {**cached, **fetched}
 
