@@ -1,7 +1,6 @@
 apify-client>=1.7
 anthropic>=0.40
 pandas>=2.2
-scikit-learn>=1.4   # optional: regex-vs-judge Cohen's kappa (gracefully skipped if absent)
 
 # dev
 pytest>=8.0

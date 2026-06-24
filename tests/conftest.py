@@ -6,7 +6,7 @@ for name in ("apify_client", "anthropic"):
     if name not in sys.modules:
         sys.modules[name] = types.ModuleType(name)
 sys.modules["apify_client"].ApifyClient = lambda *a, **k: None   # apify client unused in unit tests
-sys.modules["anthropic"].Anthropic = lambda *a, **k: None        # forces judge() down its offline fallback
+sys.modules["anthropic"].Anthropic = lambda *a, **k: None        # forces judges down their offline fallback
 os.environ.setdefault("APIFY_TOKEN", "test")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 
@@ -23,18 +23,3 @@ def pipe(tmp_path, monkeypatch):
     # point fetch cache path into tmp dir so tests don't touch real cache
     monkeypatch.setattr(mod, "FETCH_CACHE_PATH", tmp_path / "fetch_cache.csv")
     return mod
-
-
-def mkrow(pipe, url, ownership, status, claims, sentiment=0.0, framing=False,
-          intent="brand_entity", rank=1, platform="web", confidence=0.9):
-    return {
-        "url": url, "domain": pipe.domain_of(url), "platform": platform, "query": "q",
-        "intent": intent, "rank": rank, "ownership": ownership, "status": status,
-        "current_product_named": False,
-        "claim_iphone_only": claims.get("iphone_only", False),
-        "claim_attach_to_phone": claims.get("attach_to_phone", False),
-        "claim_camera_dependent": claims.get("camera_dependent", False),
-        "claim_no_android": claims.get("no_android", False),
-        "price_mentioned": None, "sentiment_inito": sentiment,
-        "competitor_framing": framing, "confidence": confidence, "title": "",
-    }

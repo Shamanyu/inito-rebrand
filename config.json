@@ -1,7 +1,7 @@
 {
   "market": { "countryCode": "us", "languageCode": "en" },
 
-  "_comment_topics": "UNIFIED topic catalog — single source of truth for BOTH tracks. Each topic has a stable `id` (cross-surface join key), an `intent`, a `web` phrasing (Google SERP/News, keyword-style) and an `llm` phrasing (ChatGPT/Perplexity, conversational). Both tracks run the SAME topics, each in its native idiom. APPEND-ONLY: never edit an existing `web`/`llm` string or `id` (breaks the time series + resume); add new topics instead. Every pre-existing query/prompt string is preserved verbatim below.",
+  "_comment_topics": "Topic catalog — single source of truth for BOTH tracks. Each topic has an `id` (readable join key), an `intent`, a `web` phrasing (Google SERP/News, keyword-style) and an `llm` phrasing (ChatGPT/Perplexity, conversational). Both tracks run the SAME topics, each in its native idiom. FREELY EDITABLE: add / remove / reword on demand — each run is a self-contained snapshot, so there is no time series to protect. Use `python pipeline.py --list-topics` to see the current set.",
   "topics": [
     { "id": "brand_head",      "intent": "brand_entity",    "web": "Inito fertility monitor",            "llm": "Inito" },
     { "id": "brand_reviews",   "intent": "brand_entity",    "web": "Inito review",                       "llm": "Inito reviews" },
@@ -46,11 +46,11 @@
   "_comment_llm_surfaces": "Live-web AI assistants, each scraped through its own web-interface actor (see actors below). These behave like a real user (live web search + citations) — no training-data-only API calls.",
   "llm_surfaces": ["chatgpt", "perplexity"],
 
-  "_comment_llm_sampling": "llm_num_runs: each (prompt x surface) is sampled this many times; samples are pooled for Wilson CIs. ChatGPT (Apify actor) draws a fresh US session per run (proxy_country pins US); Perplexity (sonar API) has no IP control, so its runs capture model variance, not IP variance.",
-  "llm_num_runs": 3,
+  "_comment_llm_sampling": "llm_num_runs: each (prompt x surface) is sampled this many times (one row per run in the snapshot — no aggregation). ChatGPT (Apify actor) draws a fresh US session per run (proxy_country pins US); Perplexity (sonar API) has no IP control, so its runs capture model variance.",
+  "llm_num_runs": 5,
   "proxy_country": "US",
 
-  "_comment_claims": "Heuristic regex (case-insensitive) for the OLD (phone-dependent) product. The LLM judge resolves ambiguity and assigns final status. NOTE: the four hormones (E3G/estrogen, LH, PdG, FSH), the companion app, the dip-strip workflow and accuracy claims are common to BOTH products and are NOT stale — do not add patterns for them.",
+  "_comment_claims": "Heuristic regex (case-insensitive) for the OLD (phone-dependent) product. Used only to (a) extract prices and (b) hint the judge / its offline fallback so `says_about_inito` can note when a source still describes the old product. NOTE: the four hormones (E3G/estrogen, LH, PdG, FSH), the companion app, the dip-strip workflow and accuracy claims are common to BOTH products — do not add patterns for them.",
   "claim_patterns": {
     "iphone_only": ["only.{0,20}iphone", "iphone.{0,12}only", "only compatible with ios", "iphone 7 and up", "specific iphone models", "compatible with iphone models only", "iphone 13 pro max"],
     "attach_to_phone": ["attach.{0,40}(phone|iphone)", "snaps? onto", "clip.{0,30}(phone|iphone)", "attachment clip", "connect.{0,30}monitor.{0,15}phone", "strap.{0,25}(device|monitor).{0,15}phone", "plug.{0,20}into.{0,20}(phone|charging port)", "lightning port", "charging port"],
@@ -60,10 +60,12 @@
   "current_signal_patterns": ["insight wireless reader", "insight reader", "wi-?fi enabled", "compatible with (both )?(ios|iphone) and android", "now (on|available (on|for)) android", "spectral mapping", "standalone reader", "no (phone )?camera needed"],
   "price_pattern": "\\$\\s?\\d{2,4}",
 
-  "owned_domains": ["inito.com", "blog.inito.com", "ng.inito.com", "apps.apple.com", "play.google.com"],
-  "_comment_owned": "apps.apple.com / play.google.com / amazon listings are owned only for Inito's own listings. Ownership is refined in code: amazon ASINs are flagged owned_marketplace; app-store pages matched by the Inito app id; ads matched by advertiser name.",
+  "owned_domains": ["inito.com"],
+  "_comment_owned": "Matched by SUFFIX in code, so every inito.com subdomain (blog., ng., AND preprod./staging.) counts as owned — that closes the gap where a preprod URL was mis-tagged third_party. App-store / amazon listings are owned only for Inito's own listings: amazon /dp/ ASINs -> owned_marketplace; app-store pages matched by owned_app_ids; ads matched by advertiser name. Non-production hosts (preprod./staging./dev.…) are still owned but flagged `nonprod_url` in the sheet so an accidentally-public/cited staging page is visible.",
   "owned_app_ids": ["id1183799668", "com.inito.insight"],
-  "competitor_domains": ["miracare.com", "shop.miracare.com", "proovtest.com", "ovul.ai"],
+  "competitor_domains": ["miracare.com", "proovtest.com", "ovul.ai"],
+  "_comment_competitor_brands": "Brand names for offline-fallback competition detection and to prime the judge. Display names can differ from domains (miracare.com -> 'Mira').",
+  "competitor_brands": ["Mira", "Proov", "Kegg", "Clearblue", "Oova", "Tempdrop", "Premom", "Ava", "Natural Cycles"],
 
   "actors": {
     "_comment": "Confirm exact slugs + input schemas on each actor's Apify Store page before first run; slugs and input keys get versioned.",
@@ -83,8 +85,6 @@
     "news_max_per_query": 20,
     "reddit_max_items": 120,
     "ads_max_items": 100,
-    "verify_max_fetch": 40,
-    "_comment_verify": "Max cited sources to fetch+check when quote-grounding a stale claim's attribution (verify_stale_attribution). Sources already judged stale in Track A history are free.",
     "perplexity_model": "sonar",
     "_comment_perplexity_model": "Perplexity sonar API model: 'sonar' (cheap, live search) or 'sonar-pro' (deeper). Used by perplexity_complete().",
     "judge_model": "claude-sonnet-4-6",

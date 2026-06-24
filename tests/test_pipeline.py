@@ -1,17 +1,15 @@
-"""Offline unit tests for the Inito GEO pipeline. Run: pytest -q"""
-import json
+"""Offline unit tests for the Inito GEO snapshot pipeline. Run: pytest -q"""
+import glob
 import pytest
-from conftest import mkrow
 
 STALE_TEXT = ("Inito is only compatible with iPhone. You attach the monitor to your phone "
               "and it uses your iPhone's camera. Android phones are not supported. $149")
 CURRENT_TEXT = ("The new InSight Wireless Reader is Wi-Fi enabled and compatible with both "
                 "iOS and Android. $99")
-MIXED_TEXT = ("The original reader clipped onto your iPhone and used the camera. The new "
-              "InSight Wireless Reader is now available on Android too.")
-# Shared, NOT-stale attributes (hormones + app + dip-strip) must never trip a claim flag.
+# Shared, unremarkable attributes (hormones + app + dip-strip) must never trip an old-product flag.
 NEUTRAL_TEXT = ("Inito measures estrogen, LH, PdG and FSH on one strip and sends results to "
                 "the Inito app on your phone. Just dip the strip and read results in 10 minutes.")
+COMPETE_TEXT = "Mira is more accurate than Inito and Proov is cheaper. Inito clips to your iPhone."
 
 
 # ---------- url helpers ----------
@@ -19,19 +17,28 @@ def test_normalize_url_strips_www_tracking_fragment_trailing_slash(pipe):
     assert pipe.normalize_url("https://WWW.Inito.com/buy-now/?utm_source=x#frag") == "https://inito.com/buy-now"
     assert pipe.normalize_url("http://inito.com/") == "http://inito.com"
 
+def test_normalize_url_strips_chatgpt_citation_params(pipe):
+    # row 8: the cited link carried disc_code / os / workflow / utm_source noise -> canonicalise it
+    noisy = "https://www.inito.com/en-us/faqs?disc_code=CORY15&os=android&workflow=ng&utm_source=chatgpt.com"
+    assert pipe.normalize_url(noisy) == "https://inito.com/en-us/faqs"
+
 def test_domain_of(pipe):
     assert pipe.domain_of("https://www.miracare.com/mira-vs-inito-comparison/") == "miracare.com"
 
 
-# ---------- ownership routing ----------
+# ---------- ownership routing (suffix match incl. preprod) ----------
 @pytest.mark.parametrize("url,expected", [
     ("https://inito.com/buy-now", "owned"),
     ("https://blog.inito.com/x", "owned"),
+    ("https://ng.inito.com/x", "owned"),
+    ("https://preprod.inito.com/en-us/faqs", "owned"),   # row 10: was mis-tagged third_party
+    ("https://staging.inito.com/x", "owned"),
     ("https://apps.apple.com/us/app/inito-fertility-ovulation/id1183799668", "owned"),
     ("https://apps.apple.com/us/app/something-else/id999", "third_party"),
     ("https://play.google.com/store/apps/details?id=com.inito.insight", "owned"),
     ("https://www.amazon.com/Inito/dp/B0CM17Y1TH", "owned_marketplace"),
     ("https://miracare.com/mira-vs-inito-comparison", "competitor"),
+    ("https://shop.miracare.com/x", "competitor"),        # subdomain matches by suffix
     ("https://leafsnap.com/inito-review", "third_party"),
 ])
 def test_ownership_routing(pipe, url, expected):
@@ -39,15 +46,41 @@ def test_ownership_routing(pipe, url, expected):
 
 @pytest.mark.parametrize("advertiser,url,expected", [
     ("Inito Inc", "https://example.com/ad", "owned"),
-    ("Miracare Inc", "https://example.com/ad", "competitor"),       # matches domain label 'miracare'
-    ("competitor ad", "https://miracare.com/x", "competitor"),       # falls through to URL ownership
+    ("Miracare Inc", "https://example.com/ad", "competitor"),
+    ("competitor ad", "https://miracare.com/x", "competitor"),
     ("Some Random Co", "https://leafsnap.com/x", "third_party"),
 ])
 def test_ownership_for_ad(pipe, advertiser, url, expected):
     assert pipe.ownership_for_ad(advertiser, url) == expected
 
+@pytest.mark.parametrize("url,expected", [
+    ("https://preprod.inito.com/en-us/faqs", True),
+    ("https://staging.inito.com/x", True),
+    ("https://dev.inito.com/x", True),
+    ("https://blog.inito.com/x", False),
+    ("https://inito.com/x", False),
+    ("https://miracare.com/x", False),
+])
+def test_is_nonprod_owned(pipe, url, expected):
+    assert pipe.is_nonprod_owned(url) is expected
 
-# ---------- claim detection ----------
+
+# ---------- links + competitor detection ----------
+def test_extract_links_dedupes_normalises_and_excludes_self(pipe):
+    text = ("See https://miracare.com/x?utm_source=a and https://proovtest.com/y "
+            "and https://miracare.com/x again, plus https://inito.com/self.")
+    links = pipe.extract_links(text, exclude_url="https://inito.com/self")
+    assert "https://miracare.com/x" in links
+    assert "https://proovtest.com/y" in links
+    assert "https://inito.com/self" not in links          # the page's own URL is excluded
+    assert links.count("https://miracare.com/x") == 1      # deduped after normalisation
+
+def test_competitors_in(pipe):
+    assert set(pipe._competitors_in(COMPETE_TEXT)) >= {"Mira", "Proov"}
+    assert pipe._competitors_in(NEUTRAL_TEXT) == []
+
+
+# ---------- claim detection (price + old-product hints, not-stale guard) ----------
 def test_detect_claims_on_stale_text(pipe):
     f = pipe.detect_claims(STALE_TEXT)
     assert f["iphone_only"] and f["attach_to_phone"] and f["camera_dependent"] and f["no_android"]
@@ -60,41 +93,60 @@ def test_detect_claims_attach_regression(pipe):
 def test_detect_claims_lightning_port(pipe):
     assert pipe.detect_claims("connect via the lightning port to read the strip")["attach_to_phone"]
 
-def test_detect_claims_on_current_text(pipe):
-    f = pipe.detect_claims(CURRENT_TEXT)
-    assert not f["iphone_only"] and not f["no_android"]
-    assert f["current_signal"]
-
 def test_detect_claims_shared_attributes_not_stale(pipe):
-    # hormones + app + dip-strip are common to both products -> no stale flags (false-positive guard)
+    # hormones + app + dip-strip are common to both products -> no old-product flags (false-positive guard)
     f = pipe.detect_claims(NEUTRAL_TEXT)
     assert not any(f[k] for k in ("iphone_only", "attach_to_phone", "camera_dependent", "no_android"))
 
 
-# ---------- judge offline fallback ----------
-def test_judge_fallback_classifies_stale_and_current(pipe):
-    v_stale = pipe.judge("http://x", STALE_TEXT, pipe.detect_claims(STALE_TEXT))
-    v_cur = pipe.judge("http://y", CURRENT_TEXT, pipe.detect_claims(CURRENT_TEXT))
-    assert v_stale["status"] == "stale"
-    assert v_cur["status"] == "current"
-    for key in ("status", "claims_confirmed", "sentiment_inito", "competitor_framing", "confidence"):
-        assert key in v_stale
-
-def test_judge_fallback_mixed(pipe):
-    v = pipe.judge("http://z", MIXED_TEXT, pipe.detect_claims(MIXED_TEXT))
-    assert v["status"] in ("mixed", "stale")
-
-def test_judge_fallback_neutral_is_current(pipe):
-    v = pipe.judge("http://n", NEUTRAL_TEXT, pipe.detect_claims(NEUTRAL_TEXT))
-    assert v["status"] == "current"
-
-def test_judge_fallback_confidence_is_numeric(pipe):
+# ---------- web judge offline fallback (narrative + competition + price) ----------
+def test_judge_web_fallback_flags_old_product(pipe):
     v = pipe.judge("http://x", STALE_TEXT, pipe.detect_claims(STALE_TEXT))
-    assert isinstance(v["confidence"], float)
-    assert 0.0 <= v["confidence"] <= 1.0
+    assert "OLD" in v["says_about_inito"]
+    assert v["price_mentioned"] == "$149"
+    for key in ("says_about_inito", "mentions_competition", "competitors_named", "sentiment_inito"):
+        assert key in v
+
+def test_judge_web_fallback_neutral_mentions_inito(pipe):
+    v = pipe.judge("http://n", NEUTRAL_TEXT, pipe.detect_claims(NEUTRAL_TEXT))
+    assert v["says_about_inito"] == "Mentions Inito."
+    assert v["mentions_competition"] is False
+
+def test_judge_web_fallback_detects_competition(pipe):
+    v = pipe.judge("http://c", COMPETE_TEXT, pipe.detect_claims(COMPETE_TEXT))
+    assert v["mentions_competition"] is True
+    assert set(v["competitors_named"]) >= {"Mira", "Proov"}
 
 
-# ---------- SERP parsing (guards the searchQuery dict/str fix) ----------
+# ---------- classify a web record into a sheet row ----------
+def test_classify_web_record_shape(pipe):
+    rec = {"url": "https://leafsnap.com/inito-review", "platform": "web", "query": "Inito review",
+           "intent": "brand_entity", "topic_id": "brand_reviews", "title": "t", "snippet": ""}
+    row = pipe.classify_web_record(rec, COMPETE_TEXT)
+    assert set(pipe.WEB_COLUMNS) <= set(row)          # every output column is present
+    assert row["source"] == "web"
+    assert row["ownership"] == "third_party"
+    assert row["mentions_competition"] is True
+    assert "Mira" in row["competitors_named"]
+    assert row["nonprod_url"] is False
+
+def test_classify_web_record_flags_nonprod(pipe):
+    rec = {"url": "https://preprod.inito.com/en-us/faqs", "platform": "web", "query": "q",
+           "intent": "brand_entity", "topic_id": "x", "title": "", "snippet": ""}
+    row = pipe.classify_web_record(rec, NEUTRAL_TEXT)
+    assert row["ownership"] == "owned" and row["nonprod_url"] is True
+
+def test_write_web_sheet(pipe):
+    import pandas as pd
+    rec = {"url": "https://leafsnap.com/x", "platform": "web", "query": "q", "intent": "brand_entity",
+           "topic_id": "x", "title": "", "snippet": ""}
+    out = pipe.DATA / "run"; out.mkdir()
+    pipe.write_web_sheet([pipe.classify_web_record(rec, NEUTRAL_TEXT)], out)
+    df = pd.read_csv(out / "web_observations.csv")
+    assert list(df.columns) == pipe.WEB_COLUMNS
+
+
+# ---------- SERP parsing (guards the searchQuery dict/str fix + topic_id threading) ----------
 def test_serp_parsing_handles_dict_and_string_query(pipe, monkeypatch):
     fake = [
         {"searchQuery": {"term": "Inito vs Mira"},
@@ -112,6 +164,13 @@ def test_serp_parsing_handles_dict_and_string_query(pipe, monkeypatch):
     assert by_q["Inito vs Mira"] == "comparison"
     assert by_q["Inito review"] == "brand_entity"
 
+def test_topic_id_threaded_web(pipe, monkeypatch):
+    fake = [{"searchQuery": {"term": "Inito vs Mira"},
+             "organicResults": [{"url": "https://miracare.com/x", "title": "t", "description": "d"}]}]
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake)
+    rows = pipe.discover_serp()
+    assert rows[0]["topic_id"] == "cmp_mira"
+
 
 # ---------- ads discovery ----------
 def test_discover_ads_parses_and_tags_ownership(pipe, monkeypatch):
@@ -121,9 +180,7 @@ def test_discover_ads_parses_and_tags_ownership(pipe, monkeypatch):
              "variants": [{"text": "Inito clips to your iPhone camera"}]}]
     monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake)
     rows = pipe.discover_ads()
-    assert len(rows) == 1
-    assert rows[0]["platform"] == "ads"
-    assert rows[0]["ownership"] == "owned"
+    assert len(rows) == 1 and rows[0]["platform"] == "ads" and rows[0]["ownership"] == "owned"
     assert "clips to your iPhone" in rows[0]["snippet"]
 
 def test_discover_ads_empty_when_no_urls(pipe, monkeypatch):
@@ -148,92 +205,16 @@ def test_enrich_content_uses_cache(pipe, monkeypatch):
     assert len(actor_calls) == 0  # served from cache, actor not called
 
 
-# ---------- review queue ----------
-def test_low_confidence_rows_written_to_review_queue(pipe):
-    rows = [
-        mkrow(pipe, "https://inito.com/buy-now", "owned", "stale", {}, confidence=0.4),
-        mkrow(pipe, "https://leafsnap.com/x", "third_party", "current", {}, confidence=0.95),
-    ]
-    pipe.persist(rows)
-    rq_path = pipe.DATA / "review_queue.csv"
-    assert rq_path.exists()
-    import pandas as pd
-    rq = pd.read_csv(rq_path)
-    assert len(rq) == 1
-    assert "inito.com" in rq.iloc[0]["url"]
-
-
-# ---------- kappa ----------
-def test_kappa_returns_float(pipe):
-    rows = [
-        mkrow(pipe, "https://inito.com/p", "owned", "stale", {"iphone_only": True}),
-        mkrow(pipe, "https://leafsnap.com/p", "third_party", "current", {}),
-    ]
-    k = pipe._kappa_regex_vs_judge(rows)
-    assert k == k or k != k  # float or nan — just must not raise
-
-
-# ---------- metrics + diff across two runs (CSV roundtrip) ----------
-def test_metrics_and_diff_decay(pipe):
-    run1 = [
-        mkrow(pipe, "https://inito.com/buy-now", "owned", "stale", {"iphone_only": True, "no_android": True}),
-        mkrow(pipe, "https://leafsnap.com/x", "third_party", "stale", {"camera_dependent": True}),
-        mkrow(pipe, "https://miracare.com/x", "competitor", "stale", {}, sentiment=-0.5, framing=True),
-        mkrow(pipe, "https://thebump.com/x", "third_party", "current", {}, sentiment=0.6, intent="category", rank=3),
-    ]
-    run2 = [
-        mkrow(pipe, "https://inito.com/buy-now", "owned", "current", {}),  # owned page fixed
-        mkrow(pipe, "https://leafsnap.com/x", "third_party", "stale", {"camera_dependent": True}),
-        mkrow(pipe, "https://miracare.com/x", "competitor", "stale", {}, sentiment=-0.5, framing=True),
-        mkrow(pipe, "https://thebump.com/x", "third_party", "current", {}, sentiment=0.6, intent="category", rank=3),
-    ]
-    pipe.RUN_DATE = "2026-06-12"; df1 = pipe.persist(run1); m1, _ = pipe.compute_metrics(df1)
-    pipe.RUN_DATE = "2026-06-19"; df2 = pipe.persist(run2); m2, mdf = pipe.compute_metrics(df2)
-
-    assert m1["owned_stale"] == 1 and m2["owned_stale"] == 0      # the headline: owned fix shows up
-    assert m1["claim_iphone_only"] == 1 and m2["claim_iphone_only"] == 0
-    assert m2["stale_or_mixed"] == 2
-    assert m2["competitor_negative"] == 1
-    assert len(mdf) == 2                                          # two dated rows -> diffable series
-    assert 0 <= m2["run_quality_score"] <= 100
-
-
-def test_kappa_derived_from_dataframe_when_no_current_rows(pipe):
-    # regression: --diff-only recomputes without in-memory rows; kappa must come from the
-    # persisted columns instead of going blank.
-    rows = [
-        mkrow(pipe, "https://oldblog.com/x", "third_party", "stale", {"iphone_only": True}),
-        mkrow(pipe, "https://thebump.com/x", "third_party", "current", {}),
-    ]
-    pipe.RUN_DATE = "2026-06-19"
-    df = pipe.persist(rows)
-    m_no_rows, _ = pipe.compute_metrics(df, current_rows=None)  # the diff-only path
-    assert m_no_rows["kappa_regex_judge"] == 1.0  # perfect regex/judge agreement, not blank
-
-
-def test_cleanup_empty_removes_only_empty_dir(pipe, tmp_path):
-    empty = tmp_path / "empty_run"; empty.mkdir()
-    full = tmp_path / "full_run"; full.mkdir(); (full / "x.csv").write_text("a")
-    pipe._cleanup_empty(empty)
-    pipe._cleanup_empty(full)
-    assert not empty.exists() and full.exists()
-
-
-def test_share_of_voice(pipe):
-    rows = [
-        mkrow(pipe, "https://inito.com/p", "owned", "current", {}, intent="category", rank=2),
-        mkrow(pipe, "https://miracare.com/p", "competitor", "current", {}, intent="category", rank=1),
-    ]
-    pipe.RUN_DATE = "2026-06-19"; df = pipe.persist(rows); m, _ = pipe.compute_metrics(df)
-    assert m["share_of_voice_category"] == 1.0
-
-
 # ---------- LLM visibility ----------
 def test_judge_llm_response_fallback(pipe):
     v = pipe.judge_llm_response("Inito reviews", "chatgpt", "Inito is a great fertility monitor.")
     assert isinstance(v["inito_mentioned"], bool)
-    assert "sentiment_inito" in v
-    assert 0.0 <= v["confidence"] <= 1.0
+    assert "says_about_inito" in v and "sources_cited" in v
+
+def test_judge_llm_fallback_competition_and_old_product(pipe):
+    v = pipe.judge_llm_response("Inito vs Mira", "chatgpt", COMPETE_TEXT)
+    assert v["mentions_competition"] is True and "Mira" in v["competitors_named"]
+    assert "OLD" in v["says_about_inito"]
 
 def test_discover_llm_visibility_runs_surface(pipe, monkeypatch):
     fake_items = [
@@ -244,16 +225,32 @@ def test_discover_llm_visibility_runs_surface(pipe, monkeypatch):
     rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"},
                                                       {"prompt": "Inito reviews", "intent": "brand_entity"}], 1)
     assert len(rows) == 2
-    assert rows[0]["surface"] == "chatgpt"
-    assert "inito_mentioned" in rows[0]
-    assert "action" in rows[0] and "priority" in rows[0]
+    assert rows[0]["surface"] == "chatgpt" and "mentioned" in rows[0]
+    assert set(pipe.LLM_COLUMNS) <= set(rows[0])
+
+def test_discover_llm_visibility_multiple_runs(pipe, monkeypatch):
+    # one row per (prompt × run) — no aggregation
+    monkeypatch.setattr(pipe, "run_actor",
+                        lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
+    rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"}], 3)
+    assert sorted(r["run"] for r in rows) == [1, 2, 3]
 
 def test_llm_row_empty_response_is_not_judged(pipe):
     # regression: an empty actor response must NOT be sent to the judge (it fabricates signals).
     row = pipe._llm_row(1, "perplexity", "Inito vs Mira", "comparison", "   ")
     assert row["status"] == "empty"
-    assert row["inito_mentioned"] is None and row["confidence"] is None
-    assert "Empty response" in row["action"] and row["priority"] == 6
+    assert row["mentioned"] is None and row["says_about_inito"] == ""
+
+def test_llm_row_canonicalises_and_flags_nonprod_sources(pipe):
+    row = pipe._llm_row(1, "chatgpt", "Inito", "brand_entity",
+                        "Inito is great. See https://inito.com/a?utm_source=chatgpt.com",
+                        extra_sources=["https://preprod.inito.com/faqs?os=android",
+                                       "https://inito.com/a"])  # dup of the inline link after normalising
+    srcs = row["sources_cited"].split(", ")
+    assert "https://inito.com/a" in srcs
+    assert "https://preprod.inito.com/faqs" in srcs          # tracking params stripped
+    assert srcs.count("https://inito.com/a") == 1            # deduped
+    assert row["nonprod_url"] is True                         # a preprod source was cited
 
 def test_run_perplexity_uses_sonar_api(pipe, monkeypatch):
     monkeypatch.setattr(pipe, "PPLX_KEY", "pplx-test")
@@ -261,7 +258,7 @@ def test_run_perplexity_uses_sonar_api(pipe, monkeypatch):
                         lambda prompt, model: ("Inito is a fertility monitor.", ["https://inito.com/"]))
     rows = pipe._run_perplexity(1, [{"prompt": "Inito", "intent": "brand_entity"}])
     assert len(rows) == 1 and rows[0]["surface"] == "perplexity" and rows[0]["status"] == "ok"
-    assert "inito_mentioned" in rows[0] and "https://inito.com/" in rows[0]["sources_cited"]
+    assert "https://inito.com" in rows[0]["sources_cited"]
 
 def test_run_perplexity_errors_without_key(pipe, monkeypatch):
     monkeypatch.setattr(pipe, "PPLX_KEY", "")
@@ -285,176 +282,31 @@ def test_discover_llm_visibility_error_rows_on_failure(pipe, monkeypatch):
         raise RuntimeError("actor exploded")
     monkeypatch.setattr(pipe, "run_actor", boom)
     rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"}], 1)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "error"
+    assert len(rows) == 1 and rows[0]["status"] == "error"
     assert "actor exploded" in rows[0]["error_note"]
-    assert rows[0]["priority"] == 6
 
-def test_resume_skips_completed_combos(pipe, monkeypatch):
+def test_write_llm_sheet(pipe, monkeypatch):
     import pandas as pd
-    # a completed chatgpt run 1 (real data) already in today's history
-    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt",
-                   "prompt": "Inito", "inito_mentioned": True}]).to_csv(
-        pipe.DATA / "llm_visibility_history.csv", index=False)
-    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
+    monkeypatch.setattr(pipe, "run_actor",
+                        lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
     rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"}], 1)
-    assert rows == []  # the only prompt was already done -> nothing to run
-
-def test_resume_is_per_prompt_not_per_run(pipe, monkeypatch):
-    # regression (C6): one done prompt must NOT skip the other prompts of the same (surface, run).
-    import pandas as pd
-    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt",
-                   "prompt": "Inito", "inito_mentioned": True}]).to_csv(
-        pipe.DATA / "llm_visibility_history.csv", index=False)
-    seen = {}
-    def fake_actor(actor_id, run_input, label, retries=1):
-        seen["prompts"] = list(run_input.get("prompts", []))
-        return [{"prompt": p, "response": "Inito is great.", "citations": []} for p in run_input["prompts"]]
-    monkeypatch.setattr(pipe, "run_actor", fake_actor)
-    rows = pipe.discover_llm_visibility(
-        ["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity"},
-                      {"prompt": "Inito reviews", "intent": "brand_entity"}], 1)
-    assert seen["prompts"] == ["Inito reviews"]            # only the undone prompt was sent
-    assert [r["prompt"] for r in rows] == ["Inito reviews"]
-
-def test_persist_llm_writes_files(pipe):
-    rows = [{"run_date": "2026-06-19", "run_index": 1, "surface": "chatgpt", "prompt": "Inito",
-             "intent": "brand_entity", "response_text": "text", "inito_mentioned": True,
-             "inito_rank": 1, "inito_recommended": True, "stale_product_described": False,
-             "stale_excerpt": None, "sources_cited": "[]", "sentiment_inito": 0.8,
-             "competitors_named": "[]", "competitor_preferred": None, "confidence": 0.9,
-             "status": "ok", "error_note": "", "action": "monitor", "priority": 5}]
-    pipe.persist_llm(rows)
-    assert (pipe.DATA / "llm_visibility_latest.csv").exists()
-
-def test_compute_llm_metrics(pipe):
-    rows = [
-        {"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt", "prompt": "Inito",
-         "intent": "brand_entity", "response_text": "t", "inito_mentioned": True, "inito_rank": 1,
-         "inito_recommended": True, "stale_product_described": False, "stale_excerpt": None,
-         "sources_cited": "[]", "sentiment_inito": 0.7, "competitors_named": "[]",
-         "competitor_preferred": None, "confidence": 0.9, "status": "ok", "error_note": ""},
-        {"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt", "prompt": "Inito reviews",
-         "intent": "brand_entity", "response_text": "t2", "inito_mentioned": False, "inito_rank": None,
-         "inito_recommended": False, "stale_product_described": True, "stale_excerpt": "iPhone only",
-         "sources_cited": "[]", "sentiment_inito": -0.2, "competitors_named": '["Mira"]',
-         "competitor_preferred": "Mira", "confidence": 0.8, "status": "ok", "error_note": ""},
-    ]
-    df = pipe.persist_llm(rows)
-    m = pipe.compute_llm_metrics(df)
-    assert m["llm_mention"] == 0.5
-    assert m["llm_stale"] == 0.5
-    assert "llm_chatgpt_mention" in m
+    out = pipe.DATA / "run"; out.mkdir()
+    pipe.write_llm_sheet(rows, out)
+    df = pd.read_csv(out / "llm_observations.csv")
+    assert list(df.columns) == pipe.LLM_COLUMNS
 
 
-# ---------- action engine ----------
-def _arow(pipe, **kw):
-    base = {"status": "ok", "intent": "brand_entity", "sources_cited": "[]",
-            "stale_product_described": False, "inito_mentioned": True,
-            "inito_recommended": False, "competitor_preferred": None}
-    base.update(kw)
-    return base
+# ---------- topic catalog ----------
+def test_topics_same_set_both_tracks(pipe):
+    topics = pipe.CFG["topics"]
+    web, llm = pipe.web_topics(), pipe.llm_topics()
+    assert len(web) == len(llm) == len(topics)
+    assert {t["id"] for t in web} == {t["id"] for t in llm} == {t["id"] for t in topics}
 
-def test_action_owned_stale_is_top_priority(pipe):
-    # blame an owned page ONLY when it's a verified stale source
-    row = _arow(pipe, stale_product_described=True,
-                sources_cited=json.dumps(["https://inito.com/old-page"]),
-                verified_stale_sources=json.dumps(["https://inito.com/old-page"]))
-    action, prio = pipe.derive_action(row)
-    assert prio == 1 and "inito.com/old-page" in action
-
-def test_action_thirdparty_stale_priority_2(pipe):
-    row = _arow(pipe, stale_product_described=True,
-                sources_cited=json.dumps(["https://leafsnap.com/inito"]),
-                verified_stale_sources=json.dumps(["https://leafsnap.com/inito"]))
-    _, prio = pipe.derive_action(row)
-    assert prio == 2
-
-def test_action_stale_but_no_verified_source_is_not_fix_our_page(pipe):
-    # regression: brand site cited but NOT verified stale -> must NOT say "fix our own page"
-    row = _arow(pipe, stale_product_described=True,
-                sources_cited=json.dumps(["https://inito.com/en-us"]),  # clean page, cited for general info
-                verified_stale_sources="[]")
-    action, prio = pipe.derive_action(row)
-    assert prio == 3 and "fix our own page" not in action.lower()
-    assert "training data" in action.lower() or "not in any cited source" in action.lower()
-
-def test_action_not_mentioned_high_vs_low_intent(pipe):
-    hi = pipe.derive_action(_arow(pipe, inito_mentioned=False, intent="comparison"))
-    lo = pipe.derive_action(_arow(pipe, inito_mentioned=False, intent="use_case"))
-    assert hi[1] == 3 and lo[1] == 4
-
-def test_action_competitor_preferred_priority_3(pipe):
-    _, prio = pipe.derive_action(_arow(pipe, competitor_preferred="Mira"))
-    assert prio == 3
-
-def test_action_recommended_is_monitor(pipe):
-    action, prio = pipe.derive_action(_arow(pipe, inito_recommended=True))
-    assert prio == 5 and "monitor" in action.lower()
-
-
-# ---------- quote-grounded attribution (the misattribution fix) ----------
-def test_verify_stale_attribution_clears_clean_owned_page(pipe, monkeypatch):
-    # Reproduces the real bug: ChatGPT's answer is stale and cites BOTH a clean owned page and a
-    # third-party review that actually contains the claim. We must blame the review, not our page.
-    OWNED_CLEAN = "Inito InSight Wireless Reader works on iOS and Android. Measures four hormones."
-    THIRD_STALE = "It clips onto your phone and reads the strip using your camera. iPhone-only for now."
-    monkeypatch.setattr(pipe, "enrich_content", lambda urls: {
-        "https://inito.com/en-us": OWNED_CLEAN,
-        "https://fertilitys.com/inito-review": THIRD_STALE,
-    })
-    rows = [{"status": "ok", "intent": "comparison", "stale_product_described": True,
-             "inito_mentioned": True, "inito_recommended": True, "competitor_preferred": None,
-             "sources_cited": json.dumps(["https://inito.com/en-us", "https://fertilitys.com/inito-review"])}]
-    pipe.verify_stale_attribution(rows)
-    verified = json.loads(rows[0]["verified_stale_sources"])
-    assert verified == ["https://fertilitys.com/inito-review"]      # only the review, NOT our page
-    assert rows[0]["priority"] == 2 and "fertilitys.com" in rows[0]["action"]
-    assert "fix our own page" not in rows[0]["action"].lower()
-
-def test_verify_stale_attribution_uses_track_a_history(pipe):
-    # a source already judged stale in Track A history counts as verified for free (no fetch)
-    import pandas as pd
-    pd.DataFrame([{"url": "https://leafsnap.com/inito", "status": "stale"}]).to_csv(
-        pipe.DATA / "observations_history.csv", index=False)
-    rows = [{"status": "ok", "intent": "brand_entity", "stale_product_described": True,
-             "inito_mentioned": True, "inito_recommended": False, "competitor_preferred": None,
-             "sources_cited": json.dumps(["https://leafsnap.com/inito"])}]
-    pipe.verify_stale_attribution(rows)
-    assert json.loads(rows[0]["verified_stale_sources"]) == ["https://leafsnap.com/inito"]
-
-def test_verify_cache_only_no_fetch(pipe, monkeypatch):
-    # re-eval mode (fetch_missing=False): verify from the page-text cache, never crawl.
-    pipe.save_fetch_cache({"https://fertilitys.com/inito-review": "It clips onto your phone and uses your camera. iPhone-only."})
-    def boom(*a, **k): raise AssertionError("must not crawl in re-eval mode")
-    monkeypatch.setattr(pipe, "enrich_content", boom)
-    rows = [{"status": "ok", "intent": "comparison", "stale_product_described": True,
-             "inito_mentioned": True, "inito_recommended": True, "competitor_preferred": None,
-             "sources_cited": json.dumps(["https://inito.com/en-us", "https://fertilitys.com/inito-review"])}]
-    pipe.verify_stale_attribution(rows, fetch_missing=False)
-    assert json.loads(rows[0]["verified_stale_sources"]) == ["https://fertilitys.com/inito-review"]
-    assert rows[0]["priority"] == 2 and "fix our own page" not in rows[0]["action"].lower()
-
-def test_reeval_llm_no_requery(pipe, monkeypatch):
-    # the parse/evaluate separation: re-evaluate stored responses with no actor/crawl calls.
-    import pandas as pd
-    pipe.save_fetch_cache({"https://fertilitys.com/inito-review": "It clips onto your phone, uses your camera, iPhone-only."})
-    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt", "prompt": "Inito vs Mira",
-                   "intent": "comparison", "response_text": "Inito uses a phone camera...", "inito_mentioned": True,
-                   "inito_rank": 1, "inito_recommended": True, "stale_product_described": True,
-                   "stale_excerpt": "phone camera", "sources_cited": json.dumps(
-                       ["https://inito.com/en-us", "https://fertilitys.com/inito-review"]),
-                   "sentiment_inito": -0.1, "competitors_named": "[]", "competitor_preferred": None,
-                   "confidence": 0.8, "status": "ok", "error_note": "", "action": "Fix our own page now: https://inito.com/en-us",
-                   "priority": 1}]).to_csv(pipe.DATA / "llm_visibility_history.csv", index=False)
-    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no re-query")))
-    monkeypatch.setattr(pipe, "enrich_content", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no crawl")))
-    out = pipe.DATA / "reeval_out"; out.mkdir()
-    pipe.reeval_llm(out)
-    df = pd.read_csv(out / "llm_visibility_latest.csv")
-    row = df.iloc[0]
-    assert "fertilitys.com" in row["action"] and "fix our own page" not in row["action"].lower()
-    assert int(row["priority"]) == 2
+def test_list_topics_smoke(pipe, capsys):
+    pipe.list_topics()
+    out = capsys.readouterr().out
+    assert "brand_head" in out and "topics" in out
 
 
 # ---------- selection resolver ----------
@@ -469,8 +321,7 @@ def test_resolve_selection_indices_and_names(pipe):
     lf = lambda x: x["q"]
     assert pipe.resolve_selection(items, "1,3", lf) == [items[0], items[2]]
     assert pipe.resolve_selection(items, "beta", lf) == [items[1]]
-    # dedupe: index 1 and name 'alpha' refer to the same item
-    assert pipe.resolve_selection(items, "1,alpha", lf) == [items[0]]
+    assert pipe.resolve_selection(items, "1,alpha", lf) == [items[0]]   # dedupe
 
 def test_resolve_selection_errors(pipe):
     items = ["a", "b"]
@@ -483,42 +334,38 @@ def test_resolve_selection_errors(pipe):
 # ---------- ad-hoc one-off prompts (--extra-prompts) ----------
 def test_parse_extra_prompts_empty(pipe):
     assert pipe.parse_extra_prompts(None) == []
-    assert pipe.parse_extra_prompts("") == []
     assert pipe.parse_extra_prompts("  ;  ; ") == []
 
 def test_parse_extra_prompts_default_intent(pipe):
-    assert pipe.parse_extra_prompts("Inito vs Oova") == [
-        {"prompt": "Inito vs Oova", "intent": "adhoc"}]
+    assert pipe.parse_extra_prompts("Inito vs Oova") == [{"prompt": "Inito vs Oova", "intent": "adhoc"}]
 
 def test_parse_extra_prompts_explicit_intent_and_separation(pipe):
     out = pipe.parse_extra_prompts("Inito vs Oova::comparison; Is Inito legit?::purchase")
-    assert out == [
-        {"prompt": "Inito vs Oova", "intent": "comparison"},
-        {"prompt": "Is Inito legit?", "intent": "purchase"}]
+    assert out == [{"prompt": "Inito vs Oova", "intent": "comparison"},
+                   {"prompt": "Is Inito legit?", "intent": "purchase"}]
 
 def test_parse_extra_prompts_dedupes_within_spec(pipe):
-    out = pipe.parse_extra_prompts("Inito vs Oova; Inito vs Oova::comparison")
-    assert out == [{"prompt": "Inito vs Oova", "intent": "adhoc"}]
+    assert pipe.parse_extra_prompts("Inito vs Oova; Inito vs Oova::comparison") == [
+        {"prompt": "Inito vs Oova", "intent": "adhoc"}]
 
 
-# ---------- --force resume bypass ----------
-def test_force_bypasses_resume(pipe, monkeypatch):
-    import pandas as pd
-    # mark the only prompt as already completed today
-    pd.DataFrame([{"run_date": pipe.RUN_DATE, "run_index": 1, "surface": "chatgpt",
-                   "prompt": "Inito", "inito_mentioned": True}]).to_csv(
-        pipe.DATA / "llm_visibility_history.csv", index=False)
-    monkeypatch.setattr(pipe, "run_actor",
-                        lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
-    prompts = [{"prompt": "Inito", "intent": "brand_entity"}]
-    # default (resume on) -> skipped; force=True -> re-queried
-    assert pipe.discover_llm_visibility(["chatgpt"], prompts, 1) == []
-    forced = pipe.discover_llm_visibility(["chatgpt"], prompts, 1, force=True)
-    assert [r["prompt"] for r in forced] == ["Inito"]
+# ---------- run folder naming + cleanup ----------
+def test_run_dir_name_is_descriptive(pipe):
+    name = pipe.run_dir_name("2026-06-20T143005", "llm", ["chatgpt", "perplexity"], 7,
+                             num_runs=3, note="weekly check")
+    assert name.startswith("2026-06-20T143005__llm__chatgpt+perplexity__7items__3runs__")
+    assert "weekly-check" in name
+
+def test_cleanup_empty_removes_only_empty_dir(pipe, tmp_path):
+    empty = tmp_path / "empty_run"; empty.mkdir()
+    full = tmp_path / "full_run"; full.mkdir(); (full / "x.csv").write_text("a")
+    pipe._cleanup_empty(empty)
+    pipe._cleanup_empty(full)
+    assert not empty.exists() and full.exists()
 
 
-# ---------- --extra-prompts end-to-end via the CLI ----------
-def test_cli_extra_prompts_runs_adhoc_and_dedupes(pipe, monkeypatch):
+# ---------- end-to-end via the CLI ----------
+def test_cli_llm_extra_prompts_writes_snapshot_and_dedupes(pipe, monkeypatch):
     import pandas as pd
     sent = []
     def fake_actor(actor_id, run_input, label):
@@ -529,49 +376,104 @@ def test_cli_extra_prompts_runs_adhoc_and_dedupes(pipe, monkeypatch):
     # config prompt 1 ("Inito") + one ad-hoc + a dup of prompt 1 that must be dropped
     pipe.main(["--llm", "--surfaces", "chatgpt", "--prompts", "1",
                "--extra-prompts", "Inito vs Oova::comparison; Inito", "--num-runs", "1", "-y"])
-    hist = pd.read_csv(pipe.DATA / "llm_visibility_history.csv")
-    prompts_run = sorted(hist["prompt"].unique().tolist())
-    assert prompts_run == ["Inito", "Inito vs Oova"]            # dup "Inito" deduped, ad-hoc included
-    assert sent.count("Inito") == 1                              # the duplicate was not sent twice
-    adhoc = hist[hist["prompt"] == "Inito vs Oova"].iloc[0]
-    assert adhoc["intent"] == "comparison" and adhoc["status"] == "ok"
+    sheets = glob.glob(str(pipe.DATA / "*__llm__*" / "llm_observations.csv"))
+    assert len(sheets) == 1
+    df = pd.read_csv(sheets[0])
+    assert sorted(df["prompt"].unique().tolist()) == ["Inito", "Inito vs Oova"]
+    assert sent.count("Inito") == 1                       # the duplicate was not sent twice
+    assert df[df["prompt"] == "Inito vs Oova"].iloc[0]["intent"] == "comparison"
 
 
-# ---------- unified topic catalog ----------
-def test_topics_full_parity_same_set_both_tracks(pipe):
-    topics = pipe.CFG["topics"]
-    web, llm = pipe.web_topics(), pipe.llm_topics()
-    # the whole point: BOTH tracks run the SAME set of topics (joinable by id)
-    assert len(web) == len(llm) == len(topics)
-    assert {t["id"] for t in web} == {t["id"] for t in llm} == {t["id"] for t in topics}
+# ---------- helpers added in the lean rewrite ----------
+def test_host_matches_suffix(pipe):
+    assert pipe._host_matches("preprod.inito.com", ["inito.com"])
+    assert pipe._host_matches("inito.com", ["inito.com"])
+    assert not pipe._host_matches("eviinito.com", ["inito.com"])   # not a real subdomain (no dot boundary)
+    assert not pipe._host_matches("notinito.com", ["inito.com"])
 
-def test_topics_preserve_legacy_strings(pipe):
-    # append-only: every pre-existing query/prompt string must still be present verbatim
-    webs = {t["q"] for t in pipe.web_topics()}
-    llms = {t["prompt"] for t in pipe.llm_topics()}
-    for s in ("Inito fertility monitor", "Inito iPhone only", "best at-home fertility monitor",
-              "Inito vs Mira", "is Inito legit"):
-        assert s in webs, s
-    for s in ("Inito", "Inito reviews", "Does Inito work on Android?", "Is Inito worth it?",
-              "Inito vs Kegg"):
-        assert s in llms, s
+def test_describes_old_product(pipe):
+    assert pipe._describes_old_product(pipe.detect_claims(STALE_TEXT))
+    assert not pipe._describes_old_product(pipe.detect_claims(NEUTRAL_TEXT))
 
-def test_topic_id_threaded_web(pipe, monkeypatch):
-    fake = [{"searchQuery": {"term": "Inito vs Mira"},
-             "organicResults": [{"url": "https://miracare.com/x", "title": "t", "description": "d"}]}]
-    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake)
-    rows = pipe.discover_serp()
-    assert rows[0]["topic_id"] == "cmp_mira"   # web string → its catalog id
+def test_normalize_url_pseudo_url_is_idempotent(pipe):
+    # pseudo-URLs (aioverview::<query>) flow through dedupe's normalize_url — must not crash / mutate apart
+    pseudo = "aioverview::Inito vs Mira"
+    once = pipe.normalize_url(pseudo)
+    assert isinstance(once, str) and once and pipe.normalize_url(once) == once
 
-def test_topic_id_threaded_llm(pipe, monkeypatch):
-    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
-    rows = pipe.discover_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity", "id": "brand_head"}], 1)
-    assert rows[0]["topic_id"] == "brand_head"
+def test_ownership_amazon_non_dp_is_third_party(pipe):
+    assert pipe.ownership("https://www.amazon.com/s?k=inito") == "third_party"
+
+def test_extract_links_caps_at_20(pipe):
+    text = " ".join(f"https://site{i}.com/page" for i in range(30))
+    assert len(pipe.extract_links(text)) == 20
 
 
-# ---------- run folder naming ----------
-def test_run_dir_name_is_descriptive(pipe):
-    name = pipe.run_dir_name("2026-06-20T143005", "llm", ["chatgpt", "perplexity"], 7,
-                             num_runs=3, note="weekly check")
-    assert name.startswith("2026-06-20T143005__llm__chatgpt+perplexity__7items__3runs__")
-    assert "weekly-check" in name
+# ---------- real (non-fallback) judge tool-block path ----------
+def test_judge_uses_tool_block_when_claude_available(pipe, monkeypatch):
+    class _Block:
+        type = "tool_use"
+        input = {"says_about_inito": "Current wireless reader.", "mentions_competition": False,
+                 "competition_summary": None, "competitors_named": [], "sentiment_inito": 0.5,
+                 "price_mentioned": "$99"}
+    class _Resp: content = [_Block()]
+    monkeypatch.setattr(pipe, "claude",
+                        type("C", (), {"messages": type("M", (), {"create": lambda self, **k: _Resp()})()})())
+    v = pipe.judge("http://x", CURRENT_TEXT, pipe.detect_claims(CURRENT_TEXT))
+    assert v["says_about_inito"] == "Current wireless reader." and v["price_mentioned"] == "$99"
+    assert "_fallback" not in v                                    # took the real path, not the fallback
+
+def test_judge_llm_uses_tool_block_when_claude_available(pipe, monkeypatch):
+    class _Block:
+        type = "tool_use"
+        input = {"inito_mentioned": True, "inito_rank": 2, "inito_recommended": True,
+                 "says_about_inito": "Recommends Inito.", "mentions_competition": True,
+                 "competition_summary": "vs Mira", "competitors_named": ["Mira"],
+                 "sentiment_inito": 0.6, "price_mentioned": None, "sources_cited": ["https://inito.com/"]}
+    class _Resp: content = [_Block()]
+    monkeypatch.setattr(pipe, "claude",
+                        type("C", (), {"messages": type("M", (), {"create": lambda self, **k: _Resp()})()})())
+    row = pipe._llm_row(1, "chatgpt", "best monitor", "category", "Inito is best. Mira is second.")
+    assert row["recommended"] is True and row["rank"] == 2 and "Mira" in row["competitors_named"]
+    assert row["says_about_inito"] == "Recommends Inito."
+
+
+# ---------- full Track A orchestration (refresh) ----------
+def test_refresh_end_to_end_writes_web_sheet(pipe, monkeypatch):
+    import pandas as pd
+    def fake_actor(actor_id, run_input, label):
+        if label == "serp":
+            return [{"searchQuery": "Inito review",
+                     "organicResults": [{"url": "https://leafsnap.com/inito-review", "title": "R",
+                                         "description": "review"},
+                                        {"url": "https://preprod.inito.com/faqs?utm_source=x", "title": "FAQ",
+                                         "description": "faq"}]}]
+        if label == "content":
+            return [{"url": pipe.normalize_url(su["url"]),
+                     "text": COMPETE_TEXT if "leafsnap" in su["url"] else CURRENT_TEXT}
+                    for su in run_input["startUrls"]]
+        return []
+    monkeypatch.setattr(pipe, "run_actor", fake_actor)
+    out = pipe.DATA / "run"; out.mkdir()
+    pipe.refresh(["serp"], [{"q": "Inito review", "intent": "brand_entity", "id": "brand_reviews"}], out)
+    df = pd.read_csv(out / "web_observations.csv")
+    assert list(df.columns) == pipe.WEB_COLUMNS
+    by_url = {r["url"]: r for _, r in df.iterrows()}
+    assert by_url["https://leafsnap.com/inito-review"]["mentions_competition"] == True
+    pre = by_url["https://preprod.inito.com/faqs"]
+    assert pre["ownership"] == "owned" and pre["nonprod_url"] == True   # preprod flagged, params stripped
+
+def test_refresh_empty_discovery_leaves_no_orphan_folder(pipe, monkeypatch):
+    monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: [])
+    out = pipe.DATA / "empty_run"; out.mkdir()
+    pipe.refresh(["serp"], [{"q": "Inito review", "intent": "brand_entity", "id": "x"}], out)
+    assert not out.exists()                                          # cleaned up, no empty folder left
+
+def test_run_llm_visibility_writes_sheet(pipe, monkeypatch):
+    import pandas as pd
+    monkeypatch.setattr(pipe, "run_actor",
+                        lambda *a, **k: [{"prompt": "Inito", "response": "Inito is great.", "citations": []}])
+    out = pipe.DATA / "llm_run"; out.mkdir()
+    pipe.run_llm_visibility(["chatgpt"], [{"prompt": "Inito", "intent": "brand_entity", "id": "brand_head"}], 2, out)
+    df = pd.read_csv(out / "llm_observations.csv")
+    assert list(df.columns) == pipe.LLM_COLUMNS and len(df) == 2     # one row per run

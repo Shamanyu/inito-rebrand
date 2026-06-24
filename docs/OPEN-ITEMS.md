@@ -1,35 +1,37 @@
 # Open Items — Inito GEO Monitor
 
-Tiny, living list. Updated 2026-06-20 (first live run). Keep it short — prune as items close.
+Tiny, living list. Updated 2026-06-24 (lean snapshot rewrite). Keep it short — prune as items close.
 
 ## Known limitations (live now)
-- **Track B IP control is not enforced.** 3 samples capture model variance, not IP variance (DESIGN §5.4).
-- **AI-Overview stale claims aren't counted** in `owned_stale`/`stale_or_mixed` (platform excluded from `_WEB_PLATFORMS`).
-- **Source attribution is now quote-grounded** (`verify_stale_attribution`): a stale claim is blamed on a
-  source only if that source is judged stale in Track A history OR fetching it + the claim regex confirms
-  it — so we no longer say "fix our own page" for a clean page. Residual: newly-fetched sources are
-  verified by **regex**, not the full Sonnet judge (cheaper, slightly coarser); see next steps.
-- **No accuracy measurement yet** — only regex↔judge kappa, not precision/recall vs a labeled gold set.
+- **Track B IP control is not enforced.** Only ChatGPT pins US (actor `country`); Perplexity (sonar) has
+  no IP control — its samples capture model variance only.
+- **Snapshot only — no trend.** By design there is no time series; comparing runs over time is now an
+  out-of-pipeline job (diff two run folders' sheets yourself if needed).
+- **Narrative quality depends on the judge.** Offline (no key) the judge falls back to a coarse heuristic
+  (`says_about_inito` ≈ "mentions Inito" / "describes the OLD product"); real runs use Claude.
 - **Reddit** returns results through intermittent `429` rate-limits (partial coverage).
-- **CSV typing** — values reload as strings; only coerced columns are safe for math.
+- **No accuracy measurement yet** — no labeled gold set scoring the judge's narrative/competition calls.
 
-## Uncovered requirements → blocking bottleneck
+## Deferred (decided, not built)
+| Item | Note |
+|---|---|
+| Generic (non-web / training-data) LLM runs | Explicitly deferred. Today both surfaces are live-web-grounded. Extension point: add a non-grounded runner in `SURFACE_RUNNERS` + a `mode` column. |
+| Trend / week-over-week view | Dropped with the time-series layer. Reintroduce only on a new requirement. |
+
+## Blocked on input
 | Want | Blocked by |
 |---|---|
-| Perplexity surface live | **Needs `PERPLEXITY_API_KEY`** in `.env` (sonar API; code is done + tested). |
+| Perplexity surface live | **Needs `PERPLEXITY_API_KEY`** in `.env` (sonar API; code done + tested). |
 | Google Ads track | **Needs `config.ads_start_urls`** = Transparency Center advertiser URLs (US). |
-| Count AI-Overview staleness | Small code change (add `ai_overview` handling to metrics) — pending decision. |
-| Cheaper/faster full Track A | Content crawler is the bottleneck (~minutes for ~200 pages) + sequential Sonnet judging. |
 
 ## Manual checks you can help with
 1. **Add `PERPLEXITY_API_KEY`** to `.env` (perplexity.ai/settings/api) to turn on Perplexity.
-2. **Populate `ads_start_urls`** from https://adstransparency.google.com (Inito + Mira/Proov, `region=US`); say if it required login.
-3. **Rotate the keys** pasted in chat earlier (Apify + Anthropic) — standard hygiene.
-4. **Decide:** should AI-Overview stale claims count toward the headline metrics? (recommend yes)
+2. **Populate `ads_start_urls`** from https://adstransparency.google.com (Inito + Mira/Proov, `region=US`).
+3. **Investigate why a `preprod.inito.com` URL is publicly reachable / cited by ChatGPT** — the pipeline
+   now flags it (`nonprod_url=True`), but the staging page being indexable at all is an infra/SEO fix.
 
 ## Next steps (high level)
-1. Finish the first full Track A run; review the real `owned_stale` fix-target list.
-2. **Re-run Track B with the quote-grounded attribution fix** (the prior run's action column was misattributed).
-3. **Accuracy: build a small gold set** (~40 pages + ~40 answers, hand-labeled) and score precision/recall on every change.
-4. Upgrade source verification from regex → Sonnet judge (higher accuracy) once the gold set exists to measure it.
-5. Turn on Perplexity (key) and add `ads_start_urls`; then AI-Overview metric inclusion, parallel judging, scheduling + Slack digest.
+1. First full live run of both tracks; review the `web_observations.csv` / `llm_observations.csv` by eye.
+2. Build a small gold set (~40 pages + ~40 answers) to score the judge's narrative/competition accuracy.
+3. Turn on Perplexity (key) and add `ads_start_urls`.
+4. (If wanted later) parallel judging, scheduling + a Slack digest of each snapshot.
