@@ -52,7 +52,7 @@ stripped). Any non-production Inito host (`preprod.`, `staging.`, …) is counte
 ## Repo layout
 
 ```
-config.json     control surface — topics (web+llm catalog), ads_start_urls, llm_surfaces,
+config.json     control surface — topics (shared catalog: one query per topic, both tracks), ads_start_urls, llm_surfaces,
                 claim regexes, domain/brand lists, actor slugs, limits
 pipeline.py     orchestrator (both tracks) + CLI with interactive multiple-choice selection
 docs/           REQUIREMENTS.md + DESIGN.md
@@ -104,9 +104,10 @@ Each run writes a descriptive folder, e.g.
 ## Config
 
 `config.json` is the control surface and is git-versioned on purpose:
-- **topics** — one catalog for BOTH tracks: each has `id` (readable join key), `intent`, a `web` phrasing
-  (Google) and an `llm` phrasing (ChatGPT/Perplexity). **Freely editable** — add / remove / reword on
-  demand; each run is a self-contained snapshot, so nothing breaks. `--list-topics` prints the set.
+- **topics** — one catalog for BOTH tracks: each has `id` (readable join key), `intent`, and one `query`
+  string sent verbatim to Google (Track A) and the assistants (Track B), so both surfaces are asked the
+  exact same thing. **Freely editable** — add / remove / reword on demand; each run is a self-contained
+  snapshot, so nothing breaks. `--list-topics` prints the set.
 - **ads_start_urls** — Google Ads Transparency Center URLs (advertiser/domain).
 - **claim_patterns** — cheap regex hints feeding the judge / its offline fallback (price + "still describes
   the old product"). Never add patterns for shared attributes (hormones/app/dip-strip).

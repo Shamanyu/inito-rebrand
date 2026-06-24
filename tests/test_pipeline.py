@@ -152,7 +152,7 @@ def test_serp_parsing_handles_dict_and_string_query(pipe, monkeypatch):
         {"searchQuery": {"term": "Inito vs Mira"},
          "organicResults": [{"url": "https://miracare.com/x", "title": "t", "description": "d"}],
          "aiOverview": "Inito is iPhone only"},
-        {"searchQuery": "Inito review",
+        {"searchQuery": "Inito reviews",
          "organicResults": [{"url": "https://leafsnap.com/inito-review"}]},
     ]
     monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: fake)
@@ -162,7 +162,7 @@ def test_serp_parsing_handles_dict_and_string_query(pipe, monkeypatch):
     assert any(u.startswith("aioverview::") for u in urls)
     by_q = {r["query"]: r["intent"] for r in rows}
     assert by_q["Inito vs Mira"] == "comparison"
-    assert by_q["Inito review"] == "brand_entity"
+    assert by_q["Inito reviews"] == "brand_entity"
 
 def test_topic_id_threaded_web(pipe, monkeypatch):
     fake = [{"searchQuery": {"term": "Inito vs Mira"},
@@ -303,6 +303,14 @@ def test_topics_same_set_both_tracks(pipe):
     assert len(web) == len(llm) == len(topics)
     assert {t["id"] for t in web} == {t["id"] for t in llm} == {t["id"] for t in topics}
 
+def test_web_and_llm_queries_are_identical(pipe):
+    # the unification guarantee: both tracks send the exact same string per topic
+    web, llm = pipe.web_topics(), pipe.llm_topics()
+    assert [t["q"] for t in web] == [p["prompt"] for p in llm]
+    # and each row carries the config `query` verbatim
+    for t, w in zip(pipe.CFG["topics"], web):
+        assert w["q"] == t["query"]
+
 def test_list_topics_smoke(pipe, capsys):
     pipe.list_topics()
     out = capsys.readouterr().out
@@ -373,14 +381,14 @@ def test_cli_llm_extra_prompts_writes_snapshot_and_dedupes(pipe, monkeypatch):
         return [{"prompt": p, "response": "Inito is great. Worth it.", "citations": []}
                 for p in run_input["prompts"]]
     monkeypatch.setattr(pipe, "run_actor", fake_actor)
-    # config prompt 1 ("Inito") + one ad-hoc + a dup of prompt 1 that must be dropped
+    # config topic 1 ("Inito fertility monitor") + one ad-hoc + a dup of topic 1 that must be dropped
     pipe.main(["--llm", "--surfaces", "chatgpt", "--prompts", "1",
-               "--extra-prompts", "Inito vs Oova::comparison; Inito", "--num-runs", "1", "-y"])
+               "--extra-prompts", "Inito vs Oova::comparison; Inito fertility monitor", "--num-runs", "1", "-y"])
     sheets = glob.glob(str(pipe.DATA / "*__llm__*" / "llm_observations.csv"))
     assert len(sheets) == 1
     df = pd.read_csv(sheets[0])
-    assert sorted(df["prompt"].unique().tolist()) == ["Inito", "Inito vs Oova"]
-    assert sent.count("Inito") == 1                       # the duplicate was not sent twice
+    assert sorted(df["prompt"].unique().tolist()) == ["Inito fertility monitor", "Inito vs Oova"]
+    assert sent.count("Inito fertility monitor") == 1     # the duplicate was not sent twice
     assert df[df["prompt"] == "Inito vs Oova"].iloc[0]["intent"] == "comparison"
 
 

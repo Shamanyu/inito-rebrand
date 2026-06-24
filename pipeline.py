@@ -56,16 +56,16 @@ LLM_COLUMNS = ["surface", "run", "prompt", "intent", "topic_id", "mentioned", "r
                "status", "error_note"]
 
 
-# ---- topic catalog: both tracks run the SAME topics, each in its native phrasing ----
+# ---- topic catalog: both tracks send the SAME `query` string verbatim ----
 def web_topics() -> List[dict]:
-    """Track A view of config.topics: [{q, intent, id}] (Google keyword phrasing)."""
-    return [{"q": t["web"], "intent": t["intent"], "id": t["id"]}
-            for t in CFG["topics"] if t.get("web")]
+    """Track A view of config.topics: [{q, intent, id}]."""
+    return [{"q": t["query"], "intent": t["intent"], "id": t["id"]}
+            for t in CFG["topics"] if t.get("query")]
 
 def llm_topics() -> List[dict]:
-    """Track B view of config.topics: [{prompt, intent, id}] (conversational phrasing)."""
-    return [{"prompt": t["llm"], "intent": t["intent"], "id": t["id"]}
-            for t in CFG["topics"] if t.get("llm")]
+    """Track B view of config.topics: [{prompt, intent, id}] — same string as web_topics()."""
+    return [{"prompt": t["query"], "intent": t["intent"], "id": t["id"]}
+            for t in CFG["topics"] if t.get("query")]
 
 
 # ---------- startup validation ----------
@@ -847,12 +847,10 @@ def prompt_select(items: list, label_fn: Callable, title: str, spec: Optional[st
 
 
 def list_topics() -> None:
-    """Print the editable topic catalog (config.topics)."""
-    print(f"\n{len(CFG['topics'])} topics (edit config.json freely — each run is a self-contained snapshot):\n")
+    """Print the editable topic catalog (config.topics). One query per topic, used by BOTH tracks."""
+    print(f"\n{len(CFG['topics'])} topics (one query per topic, sent to both tracks — edit config.json freely):\n")
     for i, t in enumerate(CFG["topics"], 1):
-        print(f"  {i:>2}. [{t['id']}] ({t['intent']})")
-        print(f"        web: {t.get('web','')!r}")
-        print(f"        llm: {t.get('llm','')!r}")
+        print(f"  {i:>2}. [{t['id']:<16}] ({t['intent']:<14}) {t.get('query','')!r}")
 
 
 # ---------- CLI ----------

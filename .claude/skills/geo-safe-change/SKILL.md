@@ -89,5 +89,7 @@ Confirm the actor's **slug + input schema** on its Apify Store page (they versio
 
 ## On the topic catalog (note for `geo-add-*` / config edits)
 `config.json` `topics` is now **freely editable** — add / remove / reword on demand; each run is a
-self-contained snapshot so there is no time series to protect (the old append-only rule is gone). `id`s
-are just readable join keys. `--list-topics` prints the set.
+self-contained snapshot so there is no time series to protect (the old append-only rule is gone). Each
+topic has a single **`query`** string sent verbatim to BOTH tracks (`web_topics()` and `llm_topics()`
+both read it) — there is no longer a separate web/llm phrasing. `id`s are just readable join keys.
+`--list-topics` prints the set.

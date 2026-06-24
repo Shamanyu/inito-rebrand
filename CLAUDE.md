@@ -70,7 +70,7 @@ stale/mixed/current column, `owned_stale`, the quote-grounded stale-attribution 
 ## Repo layout
 
 ```
-config.json     control surface (topics [web+llm catalog], ads_start_urls, llm_surfaces, claim regexes,
+config.json     control surface (topics [shared catalog: one query per topic, both tracks], ads_start_urls, llm_surfaces, claim regexes,
                 domain + competitor_brand lists, actor slugs, limits)
 pipeline.py     orchestrator (both tracks) + CLI with interactive selection
 docs/           REQUIREMENTS.md + DESIGN.md (scope/design) + OPEN-ITEMS.md

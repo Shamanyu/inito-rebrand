@@ -85,7 +85,7 @@ selectors are omitted; `--sources/--queries/--surfaces/--prompts` (indices/names
 `--num-runs`, `--extra-prompts`, `--note`.
 
 ### 4.5 Configuration (`config.json`)
-`topics` (freely editable web+llm catalog), `ads_start_urls`, `llm_surfaces`, `llm_num_runs`,
+`topics` (freely editable shared catalog — one `query` per topic, used by both tracks), `ads_start_urls`, `llm_surfaces`, `llm_num_runs`,
 `claim_patterns`/`current_signal_patterns`/`price_pattern`, `owned_domains`/`competitor_domains`/
 `competitor_brands`, `actors`, `limits`.
 
