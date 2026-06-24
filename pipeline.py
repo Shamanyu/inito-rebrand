@@ -141,6 +141,13 @@ def _competitors_in(text: str) -> List[str]:
     t = (text or "").lower()
     return [b for b in CFG.get("competitor_brands", []) if b.lower() in t]
 
+def _best_text(enriched: str, snippet: str) -> str:
+    """Pick the richer of the crawled page text vs the SERP snippet. A blocked/empty/404 crawl returns
+    a few junk chars ("Not Found", a reCAPTCHA notice) that would otherwise shadow Google's usable
+    snippet — so fall back to whichever is longer."""
+    enriched, snippet = enriched or "", snippet or ""
+    return enriched if len(enriched) >= len(snippet) else snippet
+
 def perplexity_complete(prompt: str, model: str) -> Tuple[str, List[str]]:
     """Call Perplexity's sonar API directly (OpenAI-compatible) — always live web search + citations.
     Returns (answer_text, source_urls). Raises on transport/HTTP error (caller turns it into an
@@ -532,7 +539,7 @@ def refresh(sources: List[str], queries: List[dict], out_dir: Path):
     text = enrich_content([r["url"] for r in records])
 
     log("STAGE 3 classify + write")
-    rows = [classify_web_record(r, text.get(r["url"], "") or r.get("snippet", "")) for r in records]
+    rows = [classify_web_record(r, _best_text(text.get(r["url"], ""), r.get("snippet", ""))) for r in records]
     write_web_sheet(rows, out_dir)
     nonprod = [r["url"] for r in rows if r["nonprod_url"]]
     if nonprod:
@@ -748,7 +755,8 @@ def run_llm_visibility(surfaces: List[str], prompts_cfg: List[dict], num_runs: i
         _cleanup_empty(out_dir)
         return
     write_llm_sheet(rows, out_dir)
-    nonprod = sorted({s for r in rows if r.get("nonprod_url") for s in r["sources_cited"].split(", ") if s})
+    nonprod = sorted({s for r in rows for s in str(r.get("sources_cited", "")).split(", ")
+                      if s and is_nonprod_owned(s)})
     if nonprod:
         log(f"  ⚠ non-production Inito URL(s) cited (should not be public): {nonprod[:5]}")
     log(f"LLM visibility done in {time.time()-t0:.0f}s -> {out_dir}")

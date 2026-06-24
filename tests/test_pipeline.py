@@ -416,6 +416,14 @@ def test_extract_links_caps_at_20(pipe):
     text = " ".join(f"https://site{i}.com/page" for i in range(30))
     assert len(pipe.extract_links(text)) == 20
 
+def test_best_text_prefers_richer_of_crawl_vs_snippet(pipe):
+    snippet = "Mira is more accurate than Inito and Proov is cheaper."  # the usable SERP snippet
+    assert pipe._best_text("Not Found", snippet) == snippet            # junk crawl must not shadow it
+    assert pipe._best_text("", snippet) == snippet
+    long_page = "x" * 500
+    assert pipe._best_text(long_page, snippet) == long_page            # a real page wins
+    assert pipe._best_text("", "") == ""
+
 
 # ---------- real (non-fallback) judge tool-block path ----------
 def test_judge_uses_tool_block_when_claude_available(pipe, monkeypatch):
@@ -470,6 +478,25 @@ def test_refresh_end_to_end_writes_web_sheet(pipe, monkeypatch):
     assert by_url["https://leafsnap.com/inito-review"]["mentions_competition"] == True
     pre = by_url["https://preprod.inito.com/faqs"]
     assert pre["ownership"] == "owned" and pre["nonprod_url"] == True   # preprod flagged, params stripped
+
+def test_refresh_falls_back_to_snippet_when_crawl_is_junk(pipe, monkeypatch):
+    # regression: a blocked/404 page returns junk crawl text that must NOT shadow the usable SERP
+    # snippet. Here the snippet names a competitor; the junk crawl does not.
+    import pandas as pd
+    def fake_actor(actor_id, run_input, label):
+        if label == "serp":
+            return [{"searchQuery": "Inito vs Mira",
+                     "organicResults": [{"url": "https://blocked.com/x", "title": "T",
+                                         "description": "Mira is more accurate than Inito."}]}]
+        if label == "content":
+            return [{"url": pipe.normalize_url(su["url"]), "text": "Not Found"}
+                    for su in run_input["startUrls"]]
+        return []
+    monkeypatch.setattr(pipe, "run_actor", fake_actor)
+    out = pipe.DATA / "run"; out.mkdir()
+    pipe.refresh(["serp"], [{"q": "Inito vs Mira", "intent": "comparison", "id": "cmp_mira"}], out)
+    row = pd.read_csv(out / "web_observations.csv").iloc[0]
+    assert row["mentions_competition"] == True and "Mira" in row["competitors_named"]  # from the snippet
 
 def test_refresh_empty_discovery_leaves_no_orphan_folder(pipe, monkeypatch):
     monkeypatch.setattr(pipe, "run_actor", lambda *a, **k: [])
